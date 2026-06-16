@@ -1,0 +1,12 @@
+name: selftest cleanup reusable
+
+# Dispatch-only self-test: calls the cleanup reusable workflow same-repo to
+# validate it loads and runs. Harmless against agent-tooling (no PRs to clean).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  call:
+    uses: ./.github/workflows/cleanup-stale-codex-labels.yml
+    with:
+      stale_hours: 24
