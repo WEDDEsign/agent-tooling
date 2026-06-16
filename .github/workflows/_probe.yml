@@ -5,9 +5,6 @@ on:
       stale_hours:
         type: number
         default: 24
-permissions:
-  pull-requests: write
-  contents: read
 jobs:
   probe:
     runs-on: ubuntu-latest
