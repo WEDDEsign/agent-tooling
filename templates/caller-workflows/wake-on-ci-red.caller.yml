@@ -2,7 +2,7 @@
 #
 # Fill in `workflows:` (same CI workflow names as the green caller). No
 # required_checks needed — any failing required workflow wakes Claude.
-# Requires a `CEREMONY_PAT` secret.
+# The `permissions:` block is REQUIRED. Requires a `CEREMONY_PAT` secret.
 name: Wake Claude on CI red
 
 on:
@@ -10,9 +10,14 @@ on:
     workflows: [CI, E2E]            # <-- this repo's CI workflow names
     types: [completed]
 
+permissions:
+  pull-requests: write
+  contents: read
+  checks: read
+
 jobs:
   call:
-    uses: WEDDEsign/agent-tooling/.github/workflows/wake-on-ci-red.yml@main
+    uses: WEDDEsign/agent-tooling/.github/workflows/wake-on-ci-red.yml@v0.1.0
     with:
       escalation_handle: '@WEDDEsign'
     secrets:

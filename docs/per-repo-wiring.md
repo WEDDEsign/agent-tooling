@@ -56,12 +56,18 @@ repo-specific values, and add the `CEREMONY_PAT` secret.
   workflow-scoped token (or committed through the GitHub UI). This is the one
   hard blocker for landing the server-side plane via automation.
 
-### Reusable-workflow note
+### Reusable-workflow notes
 
-GitHub Actions can only `uses:` a reusable workflow from a **published** repo
-(private is fine) — there is no local-path equivalent. So Layer 3 cannot be
-dogfooded locally; it goes live only after `WEDDEsign/agent-tooling` is pushed.
-Pin callers to a tag (`@v0.1.0`) rather than `@main` once published.
+- **Each caller needs its own `permissions:` block.** A called (reusable)
+  workflow cannot request more permission than the caller's token grants, and
+  most repos default to a read-only `GITHUB_TOKEN`. Without the block the run
+  fails at startup with `startup_failure` and no logs. The caller templates
+  already include the right block — keep it.
+- **Reusable workflows need a published repo.** GitHub Actions can only `uses:`
+  a reusable workflow from a real repo (public, or private on Team+) — there is
+  no local-path equivalent, so Layer 3 can't be dogfooded purely locally. Since
+  `agent-tooling` is public, any repo (private included) can call it. Pin callers
+  to a tag (`@v0.1.0`) rather than `@main`.
 
 ## Per-repo deltas
 

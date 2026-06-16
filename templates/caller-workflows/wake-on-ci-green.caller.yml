@@ -7,7 +7,8 @@
 #   2. `required_checks` — a JSON array of the check-RUN names that must ALL be
 #      success before re-pinging Codex (job names as they surface as checks).
 #
-# Mentra example values are shown commented. Requires a `CEREMONY_PAT` secret.
+# The `permissions:` block is REQUIRED (callers must grant what the reusable
+# needs; default tokens are read-only). Requires a `CEREMONY_PAT` secret.
 name: Wake Claude on CI green
 
 on:
@@ -15,9 +16,14 @@ on:
     workflows: [CI, E2E]            # <-- this repo's CI workflow names
     types: [completed]
 
+permissions:
+  pull-requests: write
+  contents: read
+  checks: read
+
 jobs:
   call:
-    uses: WEDDEsign/agent-tooling/.github/workflows/wake-on-ci-green.yml@main
+    uses: WEDDEsign/agent-tooling/.github/workflows/wake-on-ci-green.yml@v0.1.0
     with:
       # JSON array string. Names with spaces/parens are fine.
       required_checks: '["Backend (pytest)","Backend integration (Firestore emulator)","Frontend (tsc + build)"]'
