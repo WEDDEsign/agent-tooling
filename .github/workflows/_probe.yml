@@ -14,6 +14,5 @@ jobs:
     steps:
       - name: t
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           STALE_HOURS: ${{ inputs.stale_hours }}
         run: echo "ran stale=${STALE_HOURS}"
