@@ -1,0 +1,10 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+
+# Local, personal Claude settings (never commit machine-specific marketplace paths)
+.claude/settings.local.json
+
+# Node (if a plugin ever adds JS tooling)
+node_modules/

@@ -1,0 +1,17 @@
+# Per-repo caller — copy to <repo>/.github/workflows/auto-resolve-review-threads.yml
+#
+# Fill in `extra_identities` if Claude opens PRs under an org/human account
+# (beyond the PR author + claude[bot]). Requires a `CEREMONY_PAT` secret.
+name: Auto-resolve review threads
+
+on:
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  call:
+    uses: WEDDEsign/agent-tooling/.github/workflows/auto-resolve-review-threads.yml@main
+    with:
+      extra_identities: 'WEDDEsign'   # comma-separated; '' if none
+    secrets:
+      CEREMONY_PAT: ${{ secrets.CEREMONY_PAT }}

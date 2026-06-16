@@ -1,0 +1,133 @@
+name: Wake Claude on CI red (reusable)
+
+# Reusable (workflow_call) version of NordScope's wake-claude-on-ci-red.
+# Symmetric counterpart to wake-on-ci-green: when a required CI workflow
+# concludes `failure` on a PR that is mid-loop (carries `awaiting-codex-reping`),
+# wake a fresh session to investigate and push another fix. Without this the PR
+# sits with the label set forever and the loop stalls.
+#
+# Unlike the green workflow, this does NOT remove `awaiting-codex-reping` — the
+# loop is still in flight; CI will re-run and green/red will fire again.
+
+on:
+  workflow_call:
+    inputs:
+      escalation_handle:
+        type: string
+        default: '@WEDDEsign'
+    secrets:
+      CEREMONY_PAT:
+        required: true
+
+permissions:
+  pull-requests: write
+  contents: read
+  checks: read
+
+jobs:
+  wake_claude:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find PR for head SHA
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -eu
+          pr_number=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/pulls" \
+            --jq '[.[] | select(.state == "open")][0].number // empty')
+          if [ -z "$pr_number" ]; then
+            echo "No open PR for ${HEAD_SHA} — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Check awaiting-codex-reping label
+        id: gate
+        if: steps.pr.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+        run: |
+          set -eu
+          has_label=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/labels" \
+            --jq '[.[] | select(.name == "awaiting-codex-reping")] | length')
+          if [ "${has_label}" = "0" ]; then
+            echo "PR #${PR_NUMBER} not awaiting Codex re-ping — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Read round counter
+        id: round
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+        run: |
+          set -eu
+          n=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/labels" \
+            --jq '[.[] | .name | capture("^codex-round-(?<n>[0-9]+)$") | .n | tonumber] | max // 0')
+          echo "round=${n}" >> "$GITHUB_OUTPUT"
+          if [ "${n}" -ge 25 ]; then
+            echo "mode=hardstop" >> "$GITHUB_OUTPUT"
+          elif [ "${n}" -ge 10 ]; then
+            echo "mode=softwarn" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=normal" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Hard-stop escalation
+        if: steps.round.outputs.mode == 'hardstop'
+        env:
+          GH_TOKEN: ${{ secrets.CEREMONY_PAT }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          ROUND: ${{ steps.round.outputs.round }}
+          FAILED_WORKFLOW: ${{ github.event.workflow_run.name }}
+          FAILED_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          ESCALATION_HANDLE: ${{ inputs.escalation_handle }}
+        run: |
+          set -eu
+          gh label create loop-stuck \
+            --color B60205 \
+            --description "Codex review autopilot exceeded round 25 — human intervention required" \
+            2>/dev/null || true
+          gh pr edit "${PR_NUMBER}" --repo "${REPO}" --add-label loop-stuck
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot has reached **round ${ROUND}** on this PR with CI red on \`${FAILED_WORKFLOW}\` (${FAILED_RUN_URL}). The hard-stop threshold (25) has been crossed; not waking Claude.
+
+          The \`loop-stuck\` label has been added. To resume the autopilot remove that label and re-add \`awaiting-codex-reping\` if appropriate, or close the loop manually."
+
+      - name: Post @Claude wake-up comment
+        if: steps.round.outputs.mode != 'hardstop' && steps.gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CEREMONY_PAT }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          ROUND: ${{ steps.round.outputs.round }}
+          MODE: ${{ steps.round.outputs.mode }}
+          FAILED_WORKFLOW: ${{ github.event.workflow_run.name }}
+          FAILED_RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -eu
+          softwarn=""
+          if [ "${MODE}" = "softwarn" ]; then
+            softwarn="
+
+          **Round ${ROUND} — consider escalating via \`AskUserQuestion\` if this loop is oscillating.**"
+          fi
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "@Claude — required check \`${FAILED_WORKFLOW}\` failed on this PR (${FAILED_RUN_URL}) and the \`awaiting-codex-reping\` label is set, so the **codex-review-triage** loop is mid-flight.
+
+          Investigate the failure, push another fix commit, and leave \`awaiting-codex-reping\` set. CI will re-run automatically; the CI-green wake-up will fire when it goes green and post \`@codex review\` for the next round.
+
+          Do not bump the \`codex-round-N\` label here — that label tracks Codex review rounds, not CI failure retries.${softwarn}"

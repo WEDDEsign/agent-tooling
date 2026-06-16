@@ -1,0 +1,10 @@
+{
+  "_comment": "Commit this as <repo>/.claude/settings.json to opt the repo (and the whole team) into the shared ceremony plugin. Opening the trusted repo prompts teammates to install. PRODUCTION version: marketplace source is the published GitHub repo. For local dogfooding before publish, see settings.local-dogfood.json.",
+  "extraKnownMarketplaces": {
+    "agent-tooling": {
+      "source": { "source": "github", "repo": "WEDDEsign/agent-tooling" },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": { "ceremony@agent-tooling": true }
+}

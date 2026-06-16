@@ -1,0 +1,48 @@
+{
+  "_comment": "Canonical label taxonomy for the WEDDEsign stack. Reconciles drift found across the four repos (Mentra and intelligence-core disagreed on colors; VectraIQ had only a bare `codex`; NordScope used an ad-hoc scheme). Apply with sync-labels.sh. Hooks/skills/workflows reference these names EXACTLY — a missing label makes the ceremony silently no-op.",
+  "labels": [
+    {
+      "name": "claude-task",
+      "color": "5D3FD3",
+      "description": "Multi-file, architectural, or judgment-heavy work suited to Claude"
+    },
+    {
+      "name": "codex-task",
+      "color": "10A37F",
+      "description": "Single-file, mechanical, unambiguous work suited to Codex"
+    },
+    {
+      "name": "human-task",
+      "color": "D4A017",
+      "description": "Requires human judgment (product/design/external/calibration decision)"
+    },
+    {
+      "name": "no-issue",
+      "color": "EDEDED",
+      "description": "PR intentionally has no linked issue (chore/dep bump/docs); exempts the Issue link check"
+    },
+    {
+      "name": "awaiting-codex-reping",
+      "color": "BFD4F2",
+      "description": "Codex review autopilot is mid-loop, waiting for green CI to post @codex review"
+    },
+    {
+      "name": "loop-stuck",
+      "color": "B60205",
+      "description": "Codex review autopilot crossed the round hard-stop (25) — human intervention required; remove to resume"
+    }
+  ],
+  "dynamic_labels": [
+    {
+      "pattern": "codex-round-<N>",
+      "color": "BFD4F2",
+      "description": "Codex review autopilot round counter. Created on the fly by the autopilot (N is unbounded); NOT pre-seeded by the sync script."
+    }
+  ],
+  "legacy_unmanaged": [
+    {
+      "name": "codex",
+      "note": "Present in all four repos with no agreed meaning. Left untouched by the sync script. Decide a meaning or retire it; do not let new tooling depend on it."
+    }
+  ]
+}

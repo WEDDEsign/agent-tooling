@@ -1,0 +1,67 @@
+name: Cleanup stale Codex autopilot labels (reusable)
+
+# Reusable (workflow_call) version of NordScope's cleanup-stale-codex-labels.
+# Call from a per-repo caller triggering on a daily `schedule`.
+#
+# Removes `awaiting-codex-reping` from open PRs idle for >stale_hours. That
+# label gates both CI wake-ups, so a stale one can spuriously re-fire the
+# autopilot on an unrelated future push. Does NOT touch `codex-round-N`
+# (harmless history) or `loop-stuck` (explicit human-intervention signal).
+#
+# Uses the default GITHUB_TOKEN — no PAT needed (it posts as github-actions[bot]
+# and the comment is informational, not a wake-up).
+
+on:
+  workflow_call:
+    inputs:
+      stale_hours:
+        description: 'Idle threshold in hours before removing the label.'
+        type: number
+        default: 24
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove stale awaiting-codex-reping labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          STALE_HOURS: ${{ inputs.stale_hours }}
+        run: |
+          set -eu
+
+          cutoff=$(date -u -d "${STALE_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ)
+          echo "Cutoff: ${cutoff}"
+
+          stale=$(gh api \
+            "repos/${REPO}/pulls?state=open&per_page=100" \
+            --jq "[.[]
+              | select(any(.labels[]; .name == \"awaiting-codex-reping\"))
+              | select(.updated_at < \"${cutoff}\")
+              | {number, updated_at}]")
+
+          count=$(echo "${stale}" | jq 'length')
+          echo "Found ${count} stale PR(s) with awaiting-codex-reping older than ${cutoff}"
+
+          if [ "${count}" = "0" ]; then
+            exit 0
+          fi
+
+          # The PR list endpoint paginates at 100; if a repo ever has >100 open
+          # PRs with this label this under-reports. Logged so it'd be noticed.
+          echo "${stale}" | jq -c '.[]' | while read -r pr; do
+            number=$(echo "${pr}" | jq -r '.number')
+            updated=$(echo "${pr}" | jq -r '.updated_at')
+            echo "Cleaning PR #${number} (updated ${updated})"
+
+            gh pr comment "${number}" --repo "${REPO}" --body "The \`awaiting-codex-reping\` label has been on this PR for >${STALE_HOURS}h with no activity. Removing it so a future unrelated push doesn't spuriously wake the autopilot. Re-add the label manually if you want to resume the loop."
+
+            gh api -X DELETE \
+              "repos/${REPO}/issues/${number}/labels/awaiting-codex-reping" \
+              || true
+          done

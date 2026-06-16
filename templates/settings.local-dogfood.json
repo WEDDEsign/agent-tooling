@@ -1,0 +1,9 @@
+{
+  "_comment": "DOGFOOD version — points the marketplace at the local agent-tooling checkout instead of GitHub, so you can prove the plugin before publishing. Put this at <repo>/.claude/settings.local.json (gitignored, personal) OR just run `/plugin marketplace add /absolute/path/to/agent-tooling` once interactively. Adjust the path to wherever agent-tooling is checked out.",
+  "extraKnownMarketplaces": {
+    "agent-tooling-local": {
+      "source": { "source": "directory", "path": "C:/Users/A3W/work/wedde/agent-tooling" }
+    }
+  },
+  "enabledPlugins": { "ceremony@agent-tooling-local": true }
+}

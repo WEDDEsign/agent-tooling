@@ -1,0 +1,15 @@
+# Per-repo caller — copy to <repo>/.github/workflows/cleanup-stale-codex-labels.yml
+#
+# No repo-specific values required. Uses the default GITHUB_TOKEN (no PAT).
+name: Cleanup stale Codex autopilot labels
+
+on:
+  schedule:
+    - cron: '0 3 * * *'   # daily 03:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  call:
+    uses: WEDDEsign/agent-tooling/.github/workflows/cleanup-stale-codex-labels.yml@main
+    with:
+      stale_hours: 24

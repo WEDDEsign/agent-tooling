@@ -1,0 +1,174 @@
+name: Wake Claude on CI green (reusable)
+
+# Reusable (workflow_call) version of NordScope's wake-claude-on-ci-green.
+# Call it from a per-repo caller that triggers on `workflow_run` for that
+# repo's CI workflows. See templates/caller-workflows/wake-on-ci-green.caller.yml.
+#
+# When all `required_checks` are green on a PR that is mid-loop (carries the
+# `awaiting-codex-reping` label), post an @Claude wake-up so a fresh session
+# posts `@codex review`, then remove the label. The autopilot says "wait for
+# green before re-pinging", but subscribe_pr_activity only routes into a
+# running session and the fix-pushing session has usually ended.
+#
+# `required_checks` is a JSON array of check-RUN names (job names as they appear
+# as checks), so repos with spaces/parens in names (e.g. "Backend (pytest)")
+# work unchanged.
+#
+# Hard-stop at round >= 25 escalates instead of waking, and does NOT remove
+# `awaiting-codex-reping` (keeps loop state consistent for the human).
+
+on:
+  workflow_call:
+    inputs:
+      required_checks:
+        description: 'JSON array of required check-run names that must all be success. e.g. ["Backend (pytest)","Frontend (tsc + build)"]'
+        type: string
+        required: true
+      escalation_handle:
+        type: string
+        default: '@WEDDEsign'
+    secrets:
+      CEREMONY_PAT:
+        required: true
+
+permissions:
+  pull-requests: write
+  contents: read
+  checks: read
+
+jobs:
+  wake_claude:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find PR for head SHA
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -eu
+          pr_number=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/pulls" \
+            --jq '[.[] | select(.state == "open")][0].number // empty')
+          if [ -z "$pr_number" ]; then
+            echo "No open PR for ${HEAD_SHA} — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Check label and required-check status
+        id: gate
+        if: steps.pr.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REQUIRED_CHECKS: ${{ inputs.required_checks }}
+        run: |
+          set -eu
+          has_label=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/labels" \
+            --jq '[.[] | select(.name == "awaiting-codex-reping")] | length')
+          if [ "${has_label}" = "0" ]; then
+            echo "PR #${PR_NUMBER} not awaiting Codex re-ping — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # workflow_run fires once per CI workflow; the others may still be
+          # running. Verify EVERY required check-run name is success for this
+          # SHA before waking Claude. required_checks is a JSON array, so names
+          # with spaces/parens are handled.
+          have=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs?per_page=100" \
+            --jq '[.check_runs[] | {name, conclusion}]')
+          # For each required check NAME ($req), it is "missing" unless some
+          # check-run with that name concluded success. Bind $req so the inner
+          # `.name` comparison isn't shadowed by jq's `.` rebinding.
+          missing=$(printf '%s' "$REQUIRED_CHECKS" | jq -r --argjson have "$have" '
+            .[] as $req
+            | select(($have | any(.name == $req and .conclusion == "success")) | not)
+            | $req')
+          if [ -n "${missing}" ]; then
+            echo "Not all required checks green for ${HEAD_SHA}. Still pending/failed:"
+            echo "${missing}"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "All required checks green; waking Claude."
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Read round counter
+        id: round
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+        run: |
+          set -eu
+          n=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/labels" \
+            --jq '[.[] | .name | capture("^codex-round-(?<n>[0-9]+)$") | .n | tonumber] | max // 0')
+          echo "round=${n}" >> "$GITHUB_OUTPUT"
+          if [ "${n}" -ge 25 ]; then
+            echo "mode=hardstop" >> "$GITHUB_OUTPUT"
+          elif [ "${n}" -ge 10 ]; then
+            echo "mode=softwarn" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=normal" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Hard-stop escalation
+        if: steps.round.outputs.mode == 'hardstop'
+        env:
+          GH_TOKEN: ${{ secrets.CEREMONY_PAT }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          ROUND: ${{ steps.round.outputs.round }}
+          ESCALATION_HANDLE: ${{ inputs.escalation_handle }}
+        run: |
+          set -eu
+          gh label create loop-stuck \
+            --color B60205 \
+            --description "Codex review autopilot exceeded round 25 — human intervention required" \
+            2>/dev/null || true
+          gh pr edit "${PR_NUMBER}" --repo "${REPO}" --add-label loop-stuck
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot has reached **round ${ROUND}** on this PR with all required checks green. The hard-stop threshold (25) has been crossed; not posting \`@codex review\`.
+
+          The \`loop-stuck\` label has been added. To resume the autopilot remove that label and re-trigger Codex manually, or close the loop."
+
+      - name: Post @Claude wake-up comment
+        if: steps.gate.outputs.skip != 'true' && steps.round.outputs.mode != 'hardstop'
+        env:
+          GH_TOKEN: ${{ secrets.CEREMONY_PAT }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          ROUND: ${{ steps.round.outputs.round }}
+          MODE: ${{ steps.round.outputs.mode }}
+        run: |
+          set -eu
+          softwarn=""
+          if [ "${MODE}" = "softwarn" ]; then
+            softwarn="
+
+          **Round ${ROUND} — consider escalating via \`AskUserQuestion\` if this loop is oscillating.** Hard-stop at round 25."
+          fi
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "@Claude — required checks are green on this PR and the \`awaiting-codex-reping\` label is set, so the **codex-review-triage** loop is waiting on a re-review trigger.
+
+          Post a single new comment on this PR containing the literal string \`@codex review\` to fire the next round. Do not push additional commits unless Codex's next review surfaces new findings. The \`awaiting-codex-reping\` label has already been removed by this workflow — no need to remove it yourself.${softwarn}"
+
+      - name: Remove awaiting-codex-reping label
+        if: steps.gate.outputs.skip != 'true' && steps.round.outputs.mode != 'hardstop'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+        run: |
+          set -eu
+          gh api -X DELETE \
+            "repos/${REPO}/issues/${PR_NUMBER}/labels/awaiting-codex-reping" \
+            || true

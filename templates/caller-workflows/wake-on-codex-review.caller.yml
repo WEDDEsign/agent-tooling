@@ -1,0 +1,19 @@
+# Per-repo caller — copy to <repo>/.github/workflows/wake-on-codex-review.yml
+#
+# Fill in: escalation_handle, required_checks_text. Requires the repo to have a
+# `CEREMONY_PAT` secret (fine-grained PAT, pull-requests:write) — see
+# docs/per-repo-wiring.md. Pin @main to a tag once agent-tooling is published.
+name: Wake Claude on Codex review
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  call:
+    uses: WEDDEsign/agent-tooling/.github/workflows/wake-on-codex-review.yml@main
+    with:
+      escalation_handle: '@WEDDEsign'
+      required_checks_text: 'the required checks'   # e.g. '`Backend (pytest)`, `Frontend (tsc + build)`'
+    secrets:
+      CEREMONY_PAT: ${{ secrets.CEREMONY_PAT }}

@@ -1,0 +1,106 @@
+name: Auto-resolve review threads (reusable)
+
+# Reusable (workflow_call) version of NordScope's auto-resolve-review-threads.
+# Call from a per-repo caller triggering on `pull_request_review_comment`.
+#
+# When the PR author (or a known autopilot/maintainer identity) replies on a
+# review thread, mark the parent thread resolved — keeps the "unresolved
+# threads" badge accurate without a manual click after every fix-and-reply.
+#
+# The allowed-replier set is: the PR author, `claude[bot]` (a wake-up session
+# replying under the App identity), plus any logins passed in `extra_identities`
+# (e.g. the org account that opens Claude PRs). Only resolves, never re-opens;
+# no-op if already resolved or unmatched.
+
+on:
+  workflow_call:
+    inputs:
+      extra_identities:
+        description: 'Comma-separated extra logins allowed to auto-resolve (beyond PR author + claude[bot]). e.g. "WEDDEsign".'
+        type: string
+        default: ''
+    secrets:
+      CEREMONY_PAT:
+        required: true
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  resolve:
+    if: github.event.comment.in_reply_to_id != null
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check replier is allowed
+        id: gate
+        env:
+          AUTHOR: ${{ github.event.comment.user.login }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          EXTRA: ${{ inputs.extra_identities }}
+        run: |
+          set -eu
+          allowed="${PR_AUTHOR},claude[bot]"
+          if [ -n "${EXTRA}" ]; then
+            allowed="${allowed},${EXTRA}"
+          fi
+          # Exact-match AUTHOR against the comma-separated allow-list.
+          ok=$(printf '%s' "${allowed}" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+            | grep -Fxq "${AUTHOR}" && echo yes || echo no)
+          echo "author=${AUTHOR} allowed=${ok}"
+          if [ "${ok}" = "yes" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve parent thread
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CEREMONY_PAT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          owner=${REPO%/*}
+          name=${REPO#*/}
+
+          query_out=$(gh api graphql \
+            -f query='query($owner: String!, $name: String!, $pr: Int!) {
+              repository(owner: $owner, name: $name) {
+                pullRequest(number: $pr) {
+                  reviewThreads(first: 100) {
+                    nodes {
+                      id
+                      isResolved
+                      comments(first: 100) { nodes { databaseId } }
+                    }
+                  }
+                }
+              }
+            }' \
+            -F owner="$owner" -F name="$name" -F pr="$PR_NUMBER" 2>&1) || {
+            echo "::warning::GraphQL query failed: $query_out"
+            exit 0
+          }
+
+          thread_id=$(echo "$query_out" | jq -r "
+            .data.repository.pullRequest.reviewThreads.nodes[]
+            | select(.isResolved == false)
+            | select(any(.comments.nodes[]; .databaseId == ${COMMENT_ID}))
+            | .id" 2>/dev/null | head -n1 || true)
+
+          if [ -z "$thread_id" ] || [ "$thread_id" = "null" ]; then
+            echo "No matching unresolved thread for comment ${COMMENT_ID} on PR #${PR_NUMBER}; skipping."
+            exit 0
+          fi
+
+          echo "Resolving thread ${thread_id} on PR #${PR_NUMBER}"
+          gh api graphql \
+            -f query='mutation($threadId: ID!) {
+              resolveReviewThread(input: {threadId: $threadId}) {
+                thread { id isResolved }
+              }
+            }' \
+            -F threadId="$thread_id" || echo "::warning::resolveReviewThread failed for thread ${thread_id} — may already be resolved or token lacks permission."

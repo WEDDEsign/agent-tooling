@@ -1,0 +1,139 @@
+name: Wake Claude on Codex review (reusable)
+
+# Reusable (workflow_call) version of NordScope's wake-claude-on-codex-review.
+# Call it from a thin per-repo caller that triggers on `pull_request_review`.
+# See templates/caller-workflows/wake-on-codex-review.caller.yml.
+#
+# When Codex (chatgpt-codex-connector[bot]) submits a NON-empty, NON-approving
+# review, post an @Claude wake-up so the Claude GitHub App spins up a session
+# to run the `codex-review-triage` skill. The session that opened the PR has
+# usually ended by the time Codex finishes, so this translates Codex review
+# activity into a wake signal.
+#
+# Why a PAT (CEREMONY_PAT): the Claude GitHub App silently no-ops on mentions
+# authored by github-actions[bot] (bot-to-bot loop guard), so the wake-up must
+# be posted under a human identity.
+#
+# Skip cases: APPROVED state / APPROVED token / "no major issues" template /
+# non-Codex author / zero inline comments. Hard-stop at round >= 25 swaps the
+# @Claude wake-up for an escalation_handle ping + `loop-stuck` label.
+
+on:
+  workflow_call:
+    inputs:
+      escalation_handle:
+        description: 'Who the hard-stop pings (e.g. @WEDDEsign).'
+        type: string
+        default: '@WEDDEsign'
+      required_checks_text:
+        description: 'Human-readable list of required checks, for the wake-up body.'
+        type: string
+        default: 'the required checks'
+    secrets:
+      CEREMONY_PAT:
+        description: 'Fine-grained PAT used to author wake-up / escalation comments as a human identity.'
+        required: true
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  wake_claude:
+    if: >-
+      github.event.review.user.login == 'chatgpt-codex-connector[bot]' &&
+      github.event.review.state != 'approved' &&
+      !contains(github.event.review.body, 'APPROVED') &&
+      !contains(toLower(github.event.review.body), 'codex review: didn''t find any major issues')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Detect content-free Codex review
+        id: findings
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_ID: ${{ github.event.review.id }}
+          REVIEW_STATE: ${{ github.event.review.state }}
+        run: |
+          set -eu
+          count=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews/${REVIEW_ID}/comments" --jq 'length')
+          echo "Codex review ${REVIEW_ID}: ${count} inline comments, state=${REVIEW_STATE}"
+          # Skip whenever Codex submitted zero inline comments, regardless of
+          # state — `commented` is common but `changes_requested` with an empty
+          # body is the same no-op for the autopilot.
+          if [ "$count" = "0" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read round counter
+        id: round
+        if: steps.findings.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -eu
+          n=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/labels" \
+            --jq '[.[] | .name | capture("^codex-round-(?<n>[0-9]+)$") | .n | tonumber] | max // 0')
+          echo "round=${n}" >> "$GITHUB_OUTPUT"
+          if [ "${n}" -ge 25 ]; then
+            echo "mode=hardstop" >> "$GITHUB_OUTPUT"
+          elif [ "${n}" -ge 10 ]; then
+            echo "mode=softwarn" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=normal" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Hard-stop escalation
+        if: steps.findings.outputs.skip != 'true' && steps.round.outputs.mode == 'hardstop'
+        env:
+          GH_TOKEN: ${{ secrets.CEREMONY_PAT }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ROUND: ${{ steps.round.outputs.round }}
+          REVIEW_URL: ${{ github.event.review.html_url }}
+          ESCALATION_HANDLE: ${{ inputs.escalation_handle }}
+        run: |
+          set -eu
+          gh label create loop-stuck \
+            --color B60205 \
+            --description "Codex review autopilot exceeded round 25 — human intervention required" \
+            2>/dev/null || true
+          gh pr edit "${PR_NUMBER}" --repo "${REPO}" --add-label loop-stuck
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot has reached **round ${ROUND}** on this PR and Codex just submitted another review (${REVIEW_URL}). The hard-stop threshold (25) has been crossed; not waking Claude.
+
+          The \`loop-stuck\` label has been added. To resume the autopilot remove that label and the next Codex review will wake Claude again, or close the loop manually."
+
+      - name: Post @Claude wake-up comment
+        if: steps.findings.outputs.skip != 'true' && steps.round.outputs.mode != 'hardstop'
+        env:
+          GH_TOKEN: ${{ secrets.CEREMONY_PAT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_URL: ${{ github.event.review.html_url }}
+          REVIEW_STATE: ${{ github.event.review.state }}
+          REPO: ${{ github.repository }}
+          ROUND: ${{ steps.round.outputs.round }}
+          MODE: ${{ steps.round.outputs.mode }}
+          REQUIRED_CHECKS_TEXT: ${{ inputs.required_checks_text }}
+        run: |
+          set -eu
+          softwarn=""
+          if [ "${MODE}" = "softwarn" ]; then
+            softwarn="
+
+          **Round ${ROUND} — consider escalating via \`AskUserQuestion\` if this loop is oscillating.** Hard-stop at round 25."
+          fi
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "@Claude — Codex submitted a review (state: \`${REVIEW_STATE}\`, see ${REVIEW_URL}).
+
+          Run the **codex-review-triage** skill (the Codex review autopilot from \`CLAUDE.md\`):
+
+          1. Read every Codex comment on this PR (including inline review comments).
+          2. For mechanical comments (lint, types, naming, dead code, missing tests, small refactors, docstring/comment fixes), push fix commits and reply on each thread.
+          3. For architectural pushback, disagreement, or user-owned decisions, escalate via \`AskUserQuestion\` before acting.
+          4. Before adding \`awaiting-codex-reping\`, bump the round counter: read the existing \`codex-round-N\` label, remove it, add \`codex-round-{N+1}\` (create the label on the fly if missing).
+          5. Once fix commits land **and** ${REQUIRED_CHECKS_TEXT} are green, the CI-green wake-up will spawn a fresh session to post \`@codex review\`. If CI fails, the CI-red wake-up will spawn one to push another fix.
+          6. Terminate when Codex submits a review with state \`APPROVED\`, posts \`APPROVED\` on its own line, or uses its fixed \"Codex Review: Didn't find any major issues\" approval template. Soft-warn at round 10, hard-stop at round 25 (workflow-enforced).${softwarn}"

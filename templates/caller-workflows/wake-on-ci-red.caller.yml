@@ -1,0 +1,19 @@
+# Per-repo caller — copy to <repo>/.github/workflows/wake-on-ci-red.yml
+#
+# Fill in `workflows:` (same CI workflow names as the green caller). No
+# required_checks needed — any failing required workflow wakes Claude.
+# Requires a `CEREMONY_PAT` secret.
+name: Wake Claude on CI red
+
+on:
+  workflow_run:
+    workflows: [CI, E2E]            # <-- this repo's CI workflow names
+    types: [completed]
+
+jobs:
+  call:
+    uses: WEDDEsign/agent-tooling/.github/workflows/wake-on-ci-red.yml@main
+    with:
+      escalation_handle: '@WEDDEsign'
+    secrets:
+      CEREMONY_PAT: ${{ secrets.CEREMONY_PAT }}

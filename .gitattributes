@@ -1,0 +1,9 @@
+# Keep LF in the repo and the working tree for everything here. The shell
+# scripts and GitHub workflow YAML MUST be LF — CRLF breaks them on Linux CI
+# (`/bin/sh^M: bad interpreter`).
+* text=auto eol=lf
+*.sh   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
