@@ -1,12 +1,19 @@
+name: probe (reusable)
 on:
   workflow_call:
     inputs:
       stale_hours:
         type: number
         default: 24
-
+permissions:
+  pull-requests: write
+  contents: read
 jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "probe ran with stale_hours=${{ inputs.stale_hours }}"
+      - name: t
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STALE_HOURS: ${{ inputs.stale_hours }}
+        run: echo "ran stale=${STALE_HOURS}"
