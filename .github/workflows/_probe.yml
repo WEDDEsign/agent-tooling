@@ -1,0 +1,12 @@
+on:
+  workflow_call:
+    inputs:
+      stale_hours:
+        type: number
+        default: 24
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "probe ran with stale_hours=${{ inputs.stale_hours }}"
