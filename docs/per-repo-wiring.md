@@ -31,7 +31,7 @@ the `codex-review-triage` skill, `/open-pr`, `/delegate-to-codex`, `/fanout`, an
 the security-surface guard become available.
 
 **Dogfood first (recommended before publishing agent-tooling):** instead of the
-GitHub source, run `/plugin marketplace add C:/Users/A3W/work/wedde/agent-tooling`
+GitHub source, run `/plugin marketplace add /path/to/your/agent-tooling`
 once, or drop `templates/settings.local-dogfood.json` at
 `.claude/settings.local.json`. Prove a real PR through the loop, then switch to
 the GitHub source and commit `settings.json`.
