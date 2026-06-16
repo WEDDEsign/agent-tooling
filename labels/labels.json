@@ -29,7 +29,7 @@
     {
       "name": "loop-stuck",
       "color": "B60205",
-      "description": "Codex review autopilot crossed the round hard-stop (25) — human intervention required; remove to resume"
+      "description": "Codex review autopilot hit the round hard-stop (25); remove after human review to resume"
     }
   ],
   "dynamic_labels": [

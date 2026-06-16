@@ -37,6 +37,12 @@ jq -c '.labels[]' "$MANIFEST" | while read -r row; do
   name=$(echo "$row"  | jq -r '.name')
   color=$(echo "$row" | jq -r '.color')
   desc=$(echo "$row"  | jq -r '.description')
+  # GitHub rejects label descriptions >100 chars with a 422; fail loudly here
+  # rather than silently leaving the old description in place.
+  if [ "${#desc}" -gt 100 ]; then
+    echo "ERROR: description for '$name' is ${#desc} chars (>100). Shorten it in labels.json." >&2
+    exit 1
+  fi
   echo "  • $name (#$color) — $desc"
   if [ "$DRY_RUN" = "true" ]; then
     continue
