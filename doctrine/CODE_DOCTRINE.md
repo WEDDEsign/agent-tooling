@@ -73,9 +73,14 @@
 
 ### How this is enforced (three-way, same as the ceremony)
 
-- **CI + `preflight`** run the `file-size-ratchet` — mechanical, automatic, local-first.
-- **Codex** applies this doctrine on every review (it lives in each repo's `AGENTS.md`).
+- **Codex** applies this doctrine on every review — it lives in each repo's
+  `AGENTS.md`, so this is active the moment the doctrine is synced in.
 - **Claude** follows it while writing (the `code-doctrine` skill).
+- **`file-size-ratchet`** is the mechanical gate. It's wired into a repo's
+  `preflight` + CI as a one-time rollout step (vendor `file-size-ratchet.py`,
+  add the call). **Until a repo wires it, Codex review is the only thing holding
+  the file-size line there** — don't claim ratchet enforcement a repo doesn't
+  yet have.
 
 ### Tuning
 
