@@ -18,6 +18,7 @@ Env:     DOCTRINE_SOFT_LIMIT  (default 400)
          DOCTRINE_EXCLUDE     (comma-separated path substrings to skip)
 Exit:    non-zero on any violation, or if it cannot evaluate the diff.
 """
+
 import os
 import subprocess
 import sys
