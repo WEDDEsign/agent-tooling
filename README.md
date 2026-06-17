@@ -87,3 +87,12 @@ Per plan: prove this locally before pushing to GitHub. Add it as a local-path
 marketplace — `/plugin marketplace add ./agent-tooling` — wire the Mentra pilot
 against it, run a real PR through the loop, *then* publish to
 `WEDDEsign/agent-tooling` and flip repos to the GitHub source.
+
+## Code & architecture doctrine
+
+`doctrine/CODE_DOCTRINE.md` is the canonical quality/maintainability/scalability
+standard Codex and Claude hold every change to. Enforced three ways: the
+`doctrine/file-size-ratchet.py` ("don't get worse" gate, run in preflight + CI),
+Codex review (the doctrine is synced into each repo's `AGENTS.md` via
+`doctrine/sync-doctrine.py`), and Claude while writing. Universal rules live in
+the doctrine; repo-specific patterns stay in each repo's `AGENTS.md`.
