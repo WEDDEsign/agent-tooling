@@ -2,22 +2,23 @@
 """
 file-size-ratchet — the "don't get worse" file-size gate from CODE_DOCTRINE.md.
 
-For each code file added/modified vs the base ref:
+For each code file added / modified / renamed vs the base ref:
   - NEW file:  fail if it exceeds the HARD limit. Start small; split before you ship a giant.
   - EXISTING file already over the SOFT limit: fail if it GREW (more lines than at base).
-    Large files are grandfathered — you pay down size by splitting, never by adding to them.
+    Large files are grandfathered — pay down size by splitting, never by adding to them.
+  - RENAMED file: compared against the size at its OLD path, so a pure move isn't penalized,
+    but moving AND growing a large file is caught.
   - Everything else passes.
 
-This is intentionally blunt and mechanical: it never argues about whether a file
-*should* be split — it just stops the codebase getting worse. Judgment about
-*how* to split is the doctrine's + Codex's job.
+Fails CLOSED: if the base ref can't be resolved or git fails, it errors rather
+than silently passing — a ratchet that can't see the diff must not green-light it.
 
 Usage:   file-size-ratchet.py [base-ref]          # default base: origin/main
 Env:     DOCTRINE_SOFT_LIMIT  (default 400)
          DOCTRINE_HARD_LIMIT  (default 500)
          DOCTRINE_EXTS        (default ".py,.ts,.tsx,.js,.jsx")
          DOCTRINE_EXCLUDE     (comma-separated path substrings to skip, e.g. "migrations/,generated/")
-Exit:    non-zero on any violation.
+Exit:    non-zero on any violation, or if it cannot evaluate the diff.
 """
 import os
 import subprocess
@@ -34,8 +35,12 @@ def git(*args):
     return subprocess.run(["git", *args], capture_output=True, text=True)
 
 
+def die_closed(msg):
+    print(f"file-size ratchet: {msg}\nFailing closed — the gate must not pass a diff it cannot see.")
+    return 1
+
+
 def lines_at(ref, path):
-    """Line count of path at a git ref, or None if it didn't exist there."""
     out = git("show", f"{ref}:{path}")
     return None if out.returncode != 0 else len(out.stdout.splitlines())
 
@@ -48,29 +53,48 @@ def lines_now(path):
         return None
 
 
+def considered(path):
+    return path.endswith(EXTS) and not any(x in path for x in EXCLUDE)
+
+
 def main():
-    mb = git("merge-base", BASE, "HEAD").stdout.strip() or BASE
-    changed = git("diff", "--name-only", "--diff-filter=AM", f"{mb}...HEAD").stdout.split()
-    files = [
-        f for f in changed
-        if f.endswith(EXTS) and not any(x in f for x in EXCLUDE)
-    ]
+    mbr = git("merge-base", BASE, "HEAD")
+    if mbr.returncode != 0 or not mbr.stdout.strip():
+        return die_closed(f"cannot resolve base ref '{BASE}' (git merge-base failed). Fetch it or pass a valid base.")
+    mb = mbr.stdout.strip()
+
+    # --name-status with rename detection: A<TAB>path / M<TAB>path / R<score><TAB>old<TAB>new
+    dr = git("diff", "--name-status", "--diff-filter=AMR", "-M", f"{mb}...HEAD")
+    if dr.returncode != 0:
+        return die_closed("git diff failed.")
+
+    # build (current_path, base_path_or_None) work items
+    items = []
+    for line in dr.stdout.splitlines():
+        parts = line.split("\t")
+        status = parts[0]
+        if status.startswith("R") and len(parts) >= 3:
+            old, new = parts[1], parts[2]
+            if considered(new):
+                items.append((new, old))      # compare against old path's base size
+        elif status in ("A", "M") and len(parts) >= 2:
+            path = parts[1]
+            if considered(path):
+                items.append((path, None if status == "A" else path))
 
     violations = []
-    for f in files:
-        cur = lines_now(f)
+    for path, base_path in items:
+        cur = lines_now(path)
         if cur is None:
             continue
-        was = lines_at(mb, f)
-        if was is None:  # new file
+        was = lines_at(mb, base_path) if base_path else None
+        if was is None:  # new (or renamed-from-nonexistent)
             if cur > HARD:
-                violations.append(
-                    f"NEW  {f}: {cur} lines (> hard limit {HARD}). Split it before shipping."
-                )
-        elif cur > SOFT and cur > was:  # already-large file that grew
+                violations.append(f"NEW  {path}: {cur} lines (> hard limit {HARD}). Split it before shipping.")
+        elif cur > SOFT and cur > was:
             violations.append(
-                f"GREW {f}: {was} → {cur} lines (over soft limit {SOFT}). "
-                f"This file is already large — don't grow it, split it."
+                f"GREW {path}: {was} → {cur} lines (over soft limit {SOFT}). "
+                f"Already large — don't grow it, split it."
             )
 
     if violations:
@@ -79,12 +103,12 @@ def main():
             print("  ✗ " + v)
         print(
             f"\nDoctrine: new code files < {HARD} lines; files over {SOFT} lines must not grow.\n"
-            f"Fix by splitting on responsibility (see CODE_DOCTRINE.md §1–2). "
-            f"Tune via DOCTRINE_SOFT_LIMIT / DOCTRINE_HARD_LIMIT only in the stricter direction."
+            f"Fix by splitting on responsibility (CODE_DOCTRINE.md §1-2). "
+            f"Tune DOCTRINE_SOFT_LIMIT / DOCTRINE_HARD_LIMIT only in the stricter direction."
         )
         return 1
 
-    print(f"file-size ratchet: ok ({len(files)} code file(s) checked; soft={SOFT}, hard={HARD})")
+    print(f"file-size ratchet: ok ({len(items)} code file(s) checked; soft={SOFT}, hard={HARD})")
     return 0
 
 
