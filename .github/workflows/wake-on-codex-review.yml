@@ -136,5 +136,5 @@ jobs:
           2. For mechanical comments (lint, types, naming, dead code, missing tests, small refactors, docstring/comment fixes), push fix commits and reply on each thread.
           3. For architectural pushback, disagreement, or user-owned decisions, escalate via \`AskUserQuestion\` before acting.
           4. Before adding \`awaiting-codex-reping\`, bump the round counter: read the existing \`codex-round-N\` label, remove it, add \`codex-round-{N+1}\` (create the label on the fly if missing).
-          5. Once fix commits land **and** ${REQUIRED_CHECKS_TEXT} are green, the CI-green wake-up will spawn a fresh session to post \`@codex review\`. If CI fails, the CI-red wake-up will spawn one to push another fix.
+          5. Once fix commits land **and** ${REQUIRED_CHECKS_TEXT} are green, the CI-green wake-up posts the bare \`@codex review\` for you (directly — never append prose to that trigger or Codex flips into action mode and writes code instead of reviewing). If CI fails, the CI-red wake-up will spawn a session to push another fix.
           6. Terminate when Codex submits a review with state \`APPROVED\`, posts \`APPROVED\` on its own line, or uses its fixed \"Codex Review: Didn't find any major issues\" approval template. Soft-warn at round 10, hard-stop at round 25 (workflow-enforced).${softwarn}"
