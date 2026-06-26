@@ -5,10 +5,19 @@ name: Wake Claude on CI green (reusable)
 # repo's CI workflows. See templates/caller-workflows/wake-on-ci-green.caller.yml.
 #
 # When all `required_checks` are green on a PR that is mid-loop (carries the
-# `awaiting-codex-reping` label), post an @Claude wake-up so a fresh session
-# posts `@codex review`, then remove the label. The autopilot says "wait for
-# green before re-pinging", but subscribe_pr_activity only routes into a
+# `awaiting-codex-reping` label), post the bare `@codex review` re-ping
+# DIRECTLY (as CEREMONY_PAT), then remove the label. The autopilot says "wait
+# for green before re-pinging", but subscribe_pr_activity only routes into a
 # running session and the fix-pushing session has usually ended.
+#
+# Why the workflow posts the trigger itself instead of waking a Claude session
+# to do it: the re-ping must be the bare phrase `@codex review` with nothing
+# appended. A session asked to "post @codex review" tends to append a status
+# summary ("@codex review — addressed the P2 …"), and Codex's connector reads
+# that trailing prose as a task — it flips into action mode and writes code /
+# opens a follow-up PR instead of re-reviewing, so no review event fires and the
+# loop stalls (Mentra PR #919). Posting the literal string from the workflow
+# removes that failure mode entirely. Any soft-warn goes in a SEPARATE comment.
 #
 # `required_checks` is a JSON array of check-RUN names (job names as they appear
 # as checks), so repos with spaces/parens in names (e.g. "Backend (pytest)")
@@ -142,25 +151,31 @@ jobs:
 
           The \`loop-stuck\` label has been added. To resume the autopilot remove that label and re-trigger Codex manually, or close the loop."
 
-      - name: Post @Claude wake-up comment
-        if: steps.gate.outputs.skip != 'true' && steps.round.outputs.mode != 'hardstop'
+      # Soft-warn (round >= 10) goes in its own comment addressed to the human —
+      # NEVER appended to the trigger, or it would flip Codex into action mode.
+      - name: Post soft-warn (separate comment)
+        if: steps.gate.outputs.skip != 'true' && steps.round.outputs.mode == 'softwarn'
         env:
           GH_TOKEN: ${{ secrets.CEREMONY_PAT }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           ROUND: ${{ steps.round.outputs.round }}
-          MODE: ${{ steps.round.outputs.mode }}
+          ESCALATION_HANDLE: ${{ inputs.escalation_handle }}
         run: |
           set -eu
-          softwarn=""
-          if [ "${MODE}" = "softwarn" ]; then
-            softwarn="
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot is at **round ${ROUND}** on this PR. Re-pinging Codex automatically (next comment). If this loop is oscillating (round N's findings ≈ round N-2's), consider stepping in. Hard-stop at round 25."
 
-          **Round ${ROUND} — consider escalating via \`AskUserQuestion\` if this loop is oscillating.** Hard-stop at round 25."
-          fi
-          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "@Claude — required checks are green on this PR and the \`awaiting-codex-reping\` label is set, so the **codex-review-triage** loop is waiting on a re-review trigger.
-
-          Post a single new comment on this PR containing the literal string \`@codex review\` to fire the next round. Do not push additional commits unless Codex's next review surfaces new findings. The \`awaiting-codex-reping\` label has already been removed by this workflow — no need to remove it yourself.${softwarn}"
+      - name: Re-ping Codex (bare trigger, posted directly)
+        if: steps.gate.outputs.skip != 'true' && steps.round.outputs.mode != 'hardstop'
+        env:
+          GH_TOKEN: ${{ secrets.CEREMONY_PAT }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+        run: |
+          set -eu
+          # MUST be exactly "@codex review" with nothing appended — trailing
+          # prose flips Codex from review mode into action mode (see header).
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "@codex review"
 
       - name: Remove awaiting-codex-reping label
         if: steps.gate.outputs.skip != 'true' && steps.round.outputs.mode != 'hardstop'
