@@ -22,6 +22,11 @@
       "description": "PR intentionally has no linked issue (chore/dep bump/docs); exempts the Issue link check"
     },
     {
+      "name": "do-not-merge",
+      "color": "D93F0B",
+      "description": "Visible hold for the human merge-gate — keep review running, don't land yet (not enforced)"
+    },
+    {
       "name": "awaiting-codex-reping",
       "color": "BFD4F2",
       "description": "Codex review autopilot is mid-loop, waiting for green CI to post @codex review"

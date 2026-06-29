@@ -9,7 +9,7 @@
       "name": "ceremony",
       "source": "./plugins/ceremony",
       "description": "Codex review autopilot, PR/issue-link discipline, task-routing labels, and the security-surface guard — the ceremony all four repos share.",
-      "version": "0.1.0"
+      "version": "0.1.1"
     }
   ]
 }
