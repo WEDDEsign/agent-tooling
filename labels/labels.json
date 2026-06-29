@@ -24,7 +24,7 @@
     {
       "name": "do-not-merge",
       "color": "D93F0B",
-      "description": "Visible hold for the human merge-gate: keep a non-draft PR getting Codex review but don't land it yet (use instead of opening a draft). Not an enforced check on its own."
+      "description": "Visible hold for the human merge-gate — keep review running, don't land yet (not enforced)"
     },
     {
       "name": "awaiting-codex-reping",
