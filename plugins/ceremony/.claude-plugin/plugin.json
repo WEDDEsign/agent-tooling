@@ -1,6 +1,6 @@
 {
   "name": "ceremony",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Shared ceremony for the WEDDEsign stack: Codex review autopilot triage, PR/issue-link discipline, and a security-surface guard. Extracted from NordScope's proven loop.",
   "author": {
     "name": "WEDDEsign"
