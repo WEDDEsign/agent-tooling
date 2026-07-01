@@ -8,6 +8,28 @@
 > The mechanical parts are enforced by the `file-size-ratchet`; the rest is
 > applied in Codex review and by Claude while writing.
 
+## Before you write: the minimum-viable-code gate
+
+The cheapest code to maintain is the code you never wrote. Before adding or
+generating code, walk this ladder and stop at the first "yes":
+
+1. **Does it need to exist at all?** Can deleting, configuring, or wiring
+   existing pieces do the job instead? Prefer that.
+2. **Is it already here?** Reuse the existing helper / module / renderer. This
+   is §3 (prefer the existing pattern) and §4 (no new duplication) applied
+   *before* you write, not just caught in review.
+3. **Does the stdlib, an installed dependency, or a native language/framework
+   feature already do it?** Use it before hand-rolling.
+4. **Can it be one line or one small function?** Write that — not a class,
+   config layer, or factory you won't touch twice.
+5. Only then, write the minimum that works.
+
+**Lazy, not negligent.** The minimalism is about *structure and speculative
+generality*, never correctness: trust-boundary validation, data-loss / error
+handling, security, and accessibility are never on the chopping block (scale
+the rest to the surface's stakes — §5). When you deliberately skip structure
+you'd normally add, say so in one line so a reviewer can veto it.
+
 ## 1. File size is a smell, not a number
 
 - New code files target **< 500 lines**. Files over **~400 lines** are "large".
