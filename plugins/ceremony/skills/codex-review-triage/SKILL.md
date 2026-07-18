@@ -126,6 +126,17 @@ whose **entire body is the bare phrase `@codex review`** — nothing else.
 > alongside the review. Fixed in the wake workflows and enforced by
 > `scripts/check-codex-mentions.sh`; the same discipline applies to comments
 > *you* write. In prose, say "the bare Codex review trigger".
+>
+> **This includes PR descriptions.** The connector reads the PR body too, so a
+> `gh pr create --body` that quotes the handle triggers a coding run at PR-open
+> — before you have posted anything. Confirmed on intelligence-core#63: a PR
+> whose body quoted the handle got a "Summary / committed `e6202af` / created
+> PR metadata" narrative instead of a review, and that commit never landed
+> (remote head unchanged). Rewriting the body handle-free and re-pinging bare
+> got a normal review on the *same branch*. Commit messages appear to be safe —
+> agent-tooling#4 carried a quoted handle in one and still reviewed normally —
+> but there is no reason to risk it. The CI guard cannot see PR bodies, so this
+> one is on you: **write PR descriptions about this loop without the handle.**
 
 In the async path you usually won't post this at all: `wake-on-ci-green` posts
 the bare `@codex review` itself (deterministically, so it can't pick up prose).
