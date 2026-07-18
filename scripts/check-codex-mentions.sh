@@ -17,6 +17,11 @@
 # Rule: after stripping comment lines (YAML `#` and shell `#` never reach a
 # comment body), the mention may appear ONLY on the exact bare-trigger line.
 # In prose, write "the bare Codex review trigger" instead.
+#
+# Detection is case-insensitive because GitHub resolves mentions that way, so a
+# capitalised variant in prose is the same live mention and the same bug. The
+# allowlist stays case-SENSITIVE: only the canonical lower-case trigger is
+# permitted, so a non-canonical spelling of the trigger itself is also flagged.
 
 set -euo pipefail
 
@@ -32,7 +37,7 @@ while IFS= read -r file; do
   scanned=$((scanned + 1))
   # Drop whole-line comments; they are documentation, not posted text.
   offenders=$(sed 's/^[[:space:]]*#.*$//' "$file" \
-    | grep -n -F -e "${HANDLE}" \
+    | grep -n -i -F -e "${HANDLE}" \
     | grep -v -F -e "${BARE_TRIGGER_LINE}" \
     || true)
 
