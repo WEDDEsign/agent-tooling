@@ -129,6 +129,6 @@ jobs:
           fi
           gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "@Claude — required check \`${FAILED_WORKFLOW}\` failed on this PR (${FAILED_RUN_URL}) and the \`awaiting-codex-reping\` label is set, so the **codex-review-triage** loop is mid-flight.
 
-          Investigate the failure, push another fix commit, and leave \`awaiting-codex-reping\` set. CI will re-run automatically; the CI-green wake-up will fire when it goes green and post \`@codex review\` for the next round.
+          Investigate the failure, push another fix commit, and leave \`awaiting-codex-reping\` set. CI will re-run automatically; the CI-green wake-up will fire when it goes green and post the bare Codex review trigger for the next round.
 
           Do not bump the \`codex-round-N\` label here — that label tracks Codex review rounds, not CI failure retries.${softwarn}"

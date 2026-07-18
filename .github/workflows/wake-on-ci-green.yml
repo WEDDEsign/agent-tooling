@@ -147,7 +147,7 @@ jobs:
             --description "Codex review autopilot exceeded round 25 — human intervention required" \
             2>/dev/null || true
           gh pr edit "${PR_NUMBER}" --repo "${REPO}" --add-label loop-stuck
-          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot has reached **round ${ROUND}** on this PR with all required checks green. The hard-stop threshold (25) has been crossed; not posting \`@codex review\`.
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot has reached **round ${ROUND}** on this PR with all required checks green. The hard-stop threshold (25) has been crossed; not posting the Codex review trigger.
 
           The \`loop-stuck\` label has been added. To resume the autopilot remove that label and re-trigger Codex manually, or close the loop."
 

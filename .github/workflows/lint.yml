@@ -1,0 +1,22 @@
+name: Lint
+
+# Self-CI for agent-tooling. The wake-on-* workflows here are `workflow_call`
+# reusables consumed by other repos, so nothing in this repo exercised them —
+# a bad edit only surfaced once it had propagated to a consumer's live PR.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  codex-mentions:
+    name: Codex mention guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No Codex mentions outside the bare review trigger
+        run: bash scripts/check-codex-mentions.sh
