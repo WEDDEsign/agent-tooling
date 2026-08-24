@@ -165,19 +165,22 @@ jobs:
           set -eu
           gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot is at **round ${ROUND}** on this PR. Re-pinging Codex automatically (next comment). If this loop is oscillating (round N's findings ≈ round N-2's), consider stepping in. Hard-stop at round 25."
 
-      - name: Re-ping Codex (bare trigger, posted directly)
-        if: steps.gate.outputs.skip != 'true' && steps.round.outputs.mode != 'hardstop'
-        env:
-          GH_TOKEN: ${{ secrets.CEREMONY_PAT }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
-        run: |
-          set -eu
-          # MUST be exactly "@codex review" with nothing appended — trailing
-          # prose flips Codex from review mode into action mode (see header).
-          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "@codex review"
-
-      - name: Remove awaiting-codex-reping label
+      # The label removal comes BEFORE the post, and is the claim rather than
+      # the cleanup. `sweep-stalled-repings` runs on a schedule and can evaluate
+      # the same PR at the same moment; it is a different workflow, so no
+      # concurrency group can serialize the two, and a group shared with this
+      # one would be actively harmful — GitHub cancels a previously *pending*
+      # run when a new one queues, and CI completions arrive far too often for
+      # that (NordScope#1198). Posting and then removing is not mutual
+      # exclusion either: both paths can observe the label, and both post,
+      # before either removal is visible.
+      #
+      # GitHub's label delete is atomic, so making it the claim gives exactly
+      # one winner. A 404 means the sweep got there first and this run stands
+      # down. `|| true` is deliberately NOT used — losing the claim must be
+      # distinguishable from winning it.
+      - name: Claim the gate (remove awaiting-codex-reping)
+        id: claim
         if: steps.gate.outputs.skip != 'true' && steps.round.outputs.mode != 'hardstop'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -185,6 +188,33 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
         run: |
           set -eu
-          gh api -X DELETE \
+          if gh api -X DELETE \
             "repos/${REPO}/issues/${PR_NUMBER}/labels/awaiting-codex-reping" \
-            || true
+            >/dev/null 2>&1; then
+            echo "won=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "The gate label was already gone — the scheduled sweep claimed it. Standing down."
+            echo "won=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Re-ping Codex (bare trigger, posted directly)
+        if: steps.claim.outputs.won == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CEREMONY_PAT }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          # MUST be exactly "@codex review" with nothing appended — trailing
+          # prose flips Codex from review mode into action mode (see header).
+          if ! gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "@codex review"; then
+            # The claim already consumed the gate, so failing here would leave
+            # the PR with no label AND no trigger — an unrecoverable stall.
+            # Put it back; the scheduled sweep retries within one interval.
+            GH_TOKEN="${FALLBACK_TOKEN}" gh api -X POST \
+              "repos/${REPO}/issues/${PR_NUMBER}/labels" \
+              -f "labels[]=awaiting-codex-reping" >/dev/null 2>&1 || true
+            echo "::error::Failed to post the re-ping; gate restored for the sweep to retry."
+            exit 1
+          fi
