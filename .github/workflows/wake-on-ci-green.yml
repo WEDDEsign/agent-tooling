@@ -82,8 +82,8 @@ jobs:
           REQUIRED_CHECKS: ${{ inputs.required_checks }}
         run: |
           set -eu
-          has_label=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/labels" \
-            --jq '[.[] | select(.name == "awaiting-codex-reping")] | length')
+          has_label=$(gh api --paginate --slurp "repos/${REPO}/issues/${PR_NUMBER}/labels?per_page=100" \
+            | jq -r '[.[][] | select(.name == "awaiting-codex-reping")] | length')
           if [ "${has_label}" = "0" ]; then
             echo "PR #${PR_NUMBER} not awaiting Codex re-ping — skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -121,8 +121,8 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
         run: |
           set -eu
-          n=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/labels" \
-            --jq '[.[] | .name | capture("^codex-round-(?<n>[0-9]+)$") | .n | tonumber] | max // 0')
+          n=$(gh api --paginate --slurp "repos/${REPO}/issues/${PR_NUMBER}/labels?per_page=100" \
+            | jq -r '[.[][] | .name | capture("^codex-round-(?<n>[0-9]+)$") | .n | tonumber] | max // 0')
           echo "round=${n}" >> "$GITHUB_OUTPUT"
           if [ "${n}" -ge 25 ]; then
             echo "mode=hardstop" >> "$GITHUB_OUTPUT"
@@ -219,11 +219,16 @@ jobs:
             # a duplicate. Verify first; the trigger is assembled here rather
             # than written literally so this file keeps exactly one bare mention.
             handle="@""codex"
+            # `|| true` below: the outage that made the post fail is exactly
+            # what makes this read fail too, and `set -eu` would then exit
+            # before either branch — losing the gate precisely when it matters.
+            # An unknown answer resolves toward restoring, the recoverable side.
             landed=$(GH_TOKEN="${FALLBACK_TOKEN}" gh api --paginate --slurp \
               "repos/${REPO}/issues/${PR_NUMBER}/comments?per_page=100" \
               | jq -r --arg t "${handle} review" --arg c "${claim_at}" '
                   [.[][] | select((.body | gsub("^\\s+|\\s+$"; "")) == $t)
-                         | select(.created_at >= $c)] | length')
+                         | select(.created_at >= $c)] | length' || true)
+            landed="${landed:-0}"
             # `>=`, not `>`: both timestamps carry only second precision, so a
             # comment created in the same second as the claim fails a strict
             # comparison and the gate is then restored on top of a trigger that

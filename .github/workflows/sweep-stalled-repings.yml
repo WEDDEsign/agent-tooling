@@ -278,8 +278,8 @@ jobs:
             # intervene never reads a scheduled run's logs. Guarded on `loop-stuck`
             # being absent, because unlike the event path this branch is re-entered
             # every ten minutes and would otherwise comment forever.
-            round=$(gh api "repos/${REPO}/issues/${pr}/labels" \
-              --jq '[.[] | .name | capture("^codex-round-(?<n>[0-9]+)$") | .n | tonumber] | max // 0')
+            round=$(gh api --paginate --slurp "repos/${REPO}/issues/${pr}/labels?per_page=100" \
+              | jq -r '[.[][] | .name | capture("^codex-round-(?<n>[0-9]+)$") | .n | tonumber] | max // 0')
             if [ "${round}" -ge 25 ]; then
               # Keyed on the escalation COMMENT, not on the `loop-stuck` label. Keying
               # on the label meant a run that added the label and then failed to comment
@@ -300,7 +300,9 @@ jobs:
 
           This was picked up by the scheduled sweep rather than the CI-green event, which means the event was missed as well — the PR would otherwise have sat here silently.
 
-          The \`loop-stuck\` label has been added. To resume the autopilot, remove that label and re-trigger Codex manually; the sweep treats the manual trigger as satisfying the gate and will not re-escalate. To stop instead, remove the \`${LABEL}\` label.
+          The \`loop-stuck\` label has been added. **To resume:** remove \`loop-stuck\` **and** the \`codex-round-${round}\` label, then re-trigger Codex manually. Both are required — the round label is read by \`wake-on-codex-review\` when your manual review comes back, and on its own it would hard-stop again immediately and re-apply \`loop-stuck\`, so removing only \`loop-stuck\` cannot resume the loop. Removing the round label resets the counter to zero, which is the point: you are choosing to give it another 25 rounds.
+
+          **To stop instead:** remove the \`${LABEL}\` label.
 
           <!-- codex-autopilot:hard-stop -->"
                 note "| #${pr} | ⛔ round ${round} — hard stop, escalated and labelled \`loop-stuck\` |"
@@ -388,6 +390,23 @@ jobs:
               continue
             fi
 
+            # The head may have moved between reading its check runs and winning the
+            # claim. Posting now would re-ping a commit whose CI was never verified,
+            # using the previous head's green result, and would consume the gate that
+            # the new head's own CI-green is about to look for. Restore and stand down;
+            # the next sweep evaluates the new head properly.
+            head_now=$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha' || echo "")
+            if [ -n "${head_now}" ] && [ "${head_now}" != "${head_sha}" ]; then
+              if gh api -X POST "repos/${REPO}/issues/${pr}/labels" -f "labels[]=${LABEL}" >/dev/null 2>&1; then
+                note "| #${pr} | ↩️ head moved to \`${head_now:0:10}\` mid-claim — gate restored for the new head |"
+              else
+                had_fatal=1
+                note "| #${pr} | 🚨 **GATE LOST** — head moved mid-claim and the gate could not be restored. Re-apply \`${LABEL}\` by hand. |"
+                echo "::error::#${pr} lost its gate after the head moved mid-claim."
+              fi
+              continue
+            fi
+
             # Re-read after claiming: the event path may have posted just before our
             # delete landed. The gate is correctly consumed either way, so there is
             # nothing to undo — only a duplicate comment to avoid.
@@ -421,7 +440,14 @@ jobs:
               # trigger that really landed, which is the exact corruption this check
               # exists to prevent. Erring the other way is harmless: a trigger in that
               # same second was going out either way, so the gate is correctly consumed.
-              landed=$(last_trigger_at "${pr}")
+              # `|| true`, and the indeterminate case resolves toward restoring. Without
+              # it, `set -e` kills the run on this assignment — and the outage that made
+              # the post fail is exactly what makes this read fail too, so the gate would
+              # be lost precisely when it matters. When the answer is unknown, prefer the
+              # recoverable error: restoring over a trigger that did land costs one
+              # duplicate re-ping that the next sweep clears via state 1, while not
+              # restoring costs the PR permanently.
+              landed=$(last_trigger_at "${pr}" || true)
               if [ -n "${landed}" ] && [[ ! "${landed}" < "${claim_at}" ]]; then
                 note "| #${pr} | 🔁 **re-pinged** (client error, but the trigger landed) at round ${round} |"
                 echo "::warning::gh exited nonzero on #${pr} but the trigger is present; gate left consumed."
