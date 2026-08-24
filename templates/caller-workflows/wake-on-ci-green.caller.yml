@@ -9,12 +9,21 @@
 #
 # The `permissions:` block is REQUIRED (callers must grant what the reusable
 # needs; default tokens are read-only). Requires a `CEREMONY_PAT` secret.
+#
+# BOTH triggers below are load-bearing — do not drop the `pull_request` one.
+# `workflow_run` alone makes the loop order-dependent: the gate reads the
+# `awaiting-codex-reping` label at the moment a CI workflow completes, so a
+# label written after that point is never seen and nothing re-fires. The
+# `labeled` trigger is the other entry point, and it fails silently if absent.
 name: Wake Claude on CI green
 
 on:
   workflow_run:
     workflows: [CI, E2E]            # <-- this repo's CI workflow names
     types: [completed]
+  # Catches the label arriving after the checks have already gone green.
+  pull_request:
+    types: [labeled]
 
 permissions:
   pull-requests: write
@@ -24,7 +33,7 @@ permissions:
 
 jobs:
   call:
-    uses: WEDDEsign/agent-tooling/.github/workflows/wake-on-ci-green.yml@v0.1.0
+    uses: WEDDEsign/agent-tooling/.github/workflows/wake-on-ci-green.yml@v0.1.5
     with:
       # JSON array string. Names with spaces/parens are fine.
       required_checks: '["Backend (pytest)","Backend integration (Firestore emulator)","Frontend (tsc + build)"]'

@@ -25,6 +25,26 @@ name: Wake Claude on CI green (reusable)
 #
 # Hard-stop at round >= 25 escalates instead of waking, and does NOT remove
 # `awaiting-codex-reping` (keeps loop state consistent for the human).
+#
+# TWO ENTRY POINTS, because one is not enough.
+#
+# `workflow_run` alone made the loop order-dependent in a way that fails
+# silently. The gate reads the label at the instant a CI workflow completes —
+# roughly three minutes after a push on a small PR. A session that writes the
+# label after that point loses: the evaluation has already run and skipped,
+# and nothing will re-run it, because no further CI completion is coming. The
+# loop looks like it simply stopped, and the only recovery is a human noticing
+# and re-pinging by hand. Observed repeatedly across NordScope PRs.
+#
+# So the label being ADDED is now also an entry point. The caller adds
+# `pull_request: types: [labeled]` and this workflow evaluates the same gate:
+# if the required checks are already green, it re-pings immediately.
+#
+# The two cover every ordering between them. Label before CI finishes ->
+# workflow_run path fires. Label after -> labeled path fires. Label while CI is
+# still running -> labeled path skips on the check gate, then workflow_run
+# fires when CI completes. Both paths converge on the same gate, so neither can
+# re-ping a PR the other would have refused.
 
 on:
   workflow_call:
@@ -48,27 +68,52 @@ permissions:
 
 jobs:
   wake_claude:
+    # A fork PR is excluded on the labeled path: it receives no CEREMONY_PAT,
+    # so the re-ping step would fail rather than skip. The workflow_run path
+    # was already immune -- it only fires for runs this repo owns.
     if: >-
-      github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.conclusion == 'success'
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event == 'pull_request' &&
+       github.event.workflow_run.conclusion == 'success')
+      ||
+      (github.event_name == 'pull_request' &&
+       github.event.action == 'labeled' &&
+       github.event.label.name == 'awaiting-codex-reping' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
-      - name: Find PR for head SHA
+      - name: Resolve PR and head SHA
         id: pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          LABELED_PR: ${{ github.event.pull_request.number }}
+          LABELED_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -eu
-          pr_number=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/pulls" \
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            # Label added after CI finished. The payload already carries both
+            # values the workflow_run path has to look up. head.sha is the
+            # branch head, not the synthetic merge commit, which is what
+            # check-runs are reported against.
+            echo "Label added on PR #${LABELED_PR} (${LABELED_SHA})."
+            echo "pr_number=${LABELED_PR}" >> "$GITHUB_OUTPUT"
+            echo "head_sha=${LABELED_SHA}" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          pr_number=$(gh api "repos/${REPO}/commits/${RUN_HEAD_SHA}/pulls" \
             --jq '[.[] | select(.state == "open")][0].number // empty')
           if [ -z "$pr_number" ]; then
-            echo "No open PR for ${HEAD_SHA} — skipping."
+            echo "No open PR for ${RUN_HEAD_SHA} — skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${RUN_HEAD_SHA}" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - name: Check label and required-check status
@@ -78,7 +123,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
           REQUIRED_CHECKS: ${{ inputs.required_checks }}
         run: |
           set -eu
@@ -90,10 +135,12 @@ jobs:
             exit 0
           fi
 
-          # workflow_run fires once per CI workflow; the others may still be
-          # running. Verify EVERY required check-run name is success for this
-          # SHA before waking Claude. required_checks is a JSON array, so names
-          # with spaces/parens are handled.
+          # Verify EVERY required check-run name is success for this SHA.
+          # Both entry points need this and for different reasons: workflow_run
+          # fires once per CI workflow while the others may still be running,
+          # and a label can be added at any time, including before CI has even
+          # started. required_checks is a JSON array, so names with
+          # spaces/parens are handled.
           have=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs?per_page=100" \
             --jq '[.check_runs[] | {name, conclusion}]')
           # For each required check NAME ($req), it is "missing" unless some

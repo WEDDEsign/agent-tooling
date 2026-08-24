@@ -58,6 +58,13 @@ repo-specific values, and add the `CEREMONY_PAT` secret.
 
 ### Reusable-workflow notes
 
+- **`wake-on-ci-green` needs BOTH of its triggers.** The caller template
+  declares `workflow_run` *and* `pull_request: types: [labeled]`. Copying only
+  the first leaves the loop order-dependent: the gate reads the
+  `awaiting-codex-reping` label at the instant a CI workflow completes, so a
+  label written a moment later is never seen and nothing re-fires — the loop
+  stops silently and a human has to re-ping by hand. This was the single most
+  common autopilot stall in NordScope before the second trigger existed.
 - **Each caller needs its own `permissions:` block.** A called (reusable)
   workflow cannot request more permission than the caller's token grants, and
   most repos default to a read-only `GITHUB_TOKEN`. Without the block the run
