@@ -51,48 +51,55 @@ name: Sweep stalled Codex re-pings (reusable)
 # was reordered to match; a post that then fails puts the label back and exits
 # non-zero, which this sweep recovers on its next pass.
 #
-# WHAT "ALREADY RE-PINGED" MEANS, AND WHY THE HEAD DATE IS THE WRONG ANCHOR
-# The gate opens when the label is applied, so satisfaction must be measured
-# from THAT moment, not from the head commit. Anchoring on the head commit
-# inverts the prescribed ordering into a stall: under "label first, then push"
-# the head is still the previous commit, whose bare trigger was posted after its
-# commit date — so a head-anchored check reads "already re-pinged", deletes the
-# freshly written gate, and the push that follows then finds no label. The loop
-# stalls exactly as if the race had been lost. The ordering the autopilot
-# prescribes would have been the ordering that broke it.
+# THE THREE STATES, AND WHY TWO DIFFERENT KINDS OF EVIDENCE ARE NEEDED
+# The gate opens when the label is applied, so satisfaction is measured from
+# THAT moment — not from the head commit. Anchoring on the head inverts the
+# prescribed ordering into a stall: under "label first, then push" the head is
+# still the previous commit, whose bare trigger was posted after its commit
+# date, so a head-anchored check reads "already re-pinged", deletes the freshly
+# written gate, and the push that follows finds no label. The ordering the
+# autopilot prescribes would have been the ordering that broke it.
 #
-# Two anchors are needed, not one, because there are THREE states and any pair
-# collapsed together breaks the loop. Compare the newest bare trigger against
-# both the newest `labeled` event and the head commit's date:
-#   - trigger AFTER the label      -> the gate was consumed and the event
-#                                     path's removal failed. Clear it, no post.
-#   - trigger AFTER the head became
-#     the head, label written later -> the gate is open for a push that has not
-#                                     landed. Touch NOTHING: posting would
-#                                     re-ping code Codex already reviewed and
-#                                     consume the gate, so the push that
-#                                     follows would stall.
-#   - no trigger since this head   -> the re-ping was missed. Claim and post.
-#     became the head
+#   1. newest trigger AFTER the newest `labeled` event
+#        -> the gate was consumed and the event path's removal failed.
+#           Clear the label, do not post.
+#   2. otherwise, Codex has already reviewed the CURRENT head SHA
+#        -> the gate is open for a push that has not landed. Touch NOTHING:
+#           posting would re-ping code Codex has already read AND consume the
+#           gate, so the push that follows would stall.
+#   3. otherwise
+#        -> the re-ping was missed. Claim the gate and post.
 #
-# "Became the head" is not the commit's date. A commit prepared before it is
-# pushed — a session that commits, runs `make check` for ten minutes, then
-# pushes — can have a re-ping for the OLD head posted in between, and a
-# committer-date anchor then reads the new green head as already re-pinged.
-# The earliest check-run start for the SHA is used instead: CI starts on push,
-# so it is bounded below by the moment the commit became the head.
+# State 2 is deliberately NOT a timestamp comparison. Two were tried and both
+# were wrong in the same direction — reading as EARLIER than the moment the
+# commit became this PR's head, which makes an old trigger look like it covered
+# the new head, so the gate waits forever. The commit's own date is authorship
+# time and diverges whenever a commit is prepared before it is pushed. The
+# earliest check-run start looked safe, since CI starts on push, but the
+# check-runs endpoint is keyed on the COMMIT rather than this PR: a branch
+# reset or fast-forward to a SHA that already ran checks elsewhere brings those
+# older runs with it. Reviews are per-PR and carry `commit_id`, so "has Codex
+# reviewed this head" is exact, with no clock involved.
 #
-# The middle state is the prescribed ordering, so it is the common case rather
-# than an edge one. An earlier draft of this file had only the first and third,
-# and would have caused the stall it exists to prevent on every correctly
-# ordered round.
+# State 2 is the prescribed ordering, so it is the common case rather than an
+# edge one. An earlier draft had only states 1 and 3, and would have caused the
+# stall this workflow exists to prevent on every correctly ordered round.
 #
 # WHAT IT FIXES, AND WHAT IT ONLY MAKES VISIBLE
 # Fixed outright:
 #   - the missed-label race above;
-#   - a content-free Codex pass arriving when CI is ALREADY green. No further
-#     CI completion is coming, and label writes do not emit `workflow_run`, so
-#     today that state needs a human to re-run a workflow by hand.
+#   - a gate applied when CI is ALREADY green — after a content-free Codex
+#     pass, say. No further CI completion is coming and label writes do not
+#     emit `workflow_run`, so today that state needs a human to re-run a
+#     workflow by hand. The sweep needs no event.
+#     NOTE the precondition: something must have applied the gate. If a
+#     content-free review arrives and NO session runs, `wake-on-codex-review`
+#     filters the event and nothing re-labels, so the PR carries no gate and
+#     this sweep — which enumerates gated PRs — cannot see it. That is
+#     deliberate rather than a hole: a pass with no findings is Codex saying
+#     it has nothing to add, and auto-re-pinging it would loop on unchanged
+#     code. An earlier draft of this header claimed the content-free case
+#     outright, which was wrong.
 # Surfaced but NOT fixed — these appear in the run summary instead of being
 # invisible, and still need a person:
 #   - a merge conflict, which stops CI from running at all (GitHub cannot
@@ -214,6 +221,10 @@ jobs:
             exit 0
           fi
 
+          # Set when a PR is left with neither trigger nor gate. Sweeping continues so
+          # one broken PR cannot hide the rest, but the run must end red.
+          had_fatal=0
+
           note "| PR | Outcome |"
           note "| --- | --- |"
 
@@ -270,9 +281,15 @@ jobs:
             round=$(gh api "repos/${REPO}/issues/${pr}/labels" \
               --jq '[.[] | .name | capture("^codex-round-(?<n>[0-9]+)$") | .n | tonumber] | max // 0')
             if [ "${round}" -ge 25 ]; then
-              stuck=$(gh api "repos/${REPO}/issues/${pr}/labels" \
-                --jq '[.[] | select(.name == "loop-stuck")] | length')
-              if [ "${stuck}" = "0" ]; then
+              # Keyed on the escalation COMMENT, not on the `loop-stuck` label. Keying
+              # on the label meant a run that added the label and then failed to comment
+              # left every later sweep taking the "already escalated" branch, so the
+              # handle was never notified and a scheduled run summary nobody reads was
+              # the only record. The marker makes the comment its own completion record,
+              # so a half-finished escalation retries.
+              escalated=$(gh api --paginate --slurp "repos/${REPO}/issues/${pr}/comments?per_page=100" \
+                | jq -r '[.[][] | select(.body | contains("<!-- codex-autopilot:hard-stop -->"))] | length')
+              if [ "${escalated}" = "0" ]; then
                 gh label create loop-stuck \
                   --color B60205 \
                   --description "Codex review autopilot exceeded round 25 — human intervention required" \
@@ -283,9 +300,16 @@ jobs:
 
           This was picked up by the scheduled sweep rather than the CI-green event, which means the event was missed as well — the PR would otherwise have sat here silently.
 
-          The \`loop-stuck\` label has been added. To resume the autopilot, remove that label and re-trigger Codex manually; the sweep treats the manual trigger as satisfying the gate and will not re-escalate. To stop instead, remove the \`${LABEL}\` label."
+          The \`loop-stuck\` label has been added. To resume the autopilot, remove that label and re-trigger Codex manually; the sweep treats the manual trigger as satisfying the gate and will not re-escalate. To stop instead, remove the \`${LABEL}\` label.
+
+          <!-- codex-autopilot:hard-stop -->"
                 note "| #${pr} | ⛔ round ${round} — hard stop, escalated and labelled \`loop-stuck\` |"
               else
+                # Re-asserted rather than assumed: the escalation is complete once the
+                # comment exists, but a human may have removed the label without
+                # re-triggering, and this branch is only reached while the gate is
+                # still unsatisfied.
+                gh pr edit "${pr}" --repo "${REPO}" --add-label loop-stuck 2>/dev/null || true
                 note "| #${pr} | ⛔ round ${round} — hard stop, already escalated |"
               fi
               continue
@@ -294,8 +318,13 @@ jobs:
             # Every required check must be success for the CURRENT head. Same jq shape
             # as wake-on-ci-green: bind $req so the inner .name comparison is not
             # shadowed by jq's rebinding of `.`.
-            runs=$(gh api "repos/${REPO}/commits/${head_sha}/check-runs?per_page=100" \
-              --jq '[.check_runs[] | {name, conclusion, started_at}]')
+            # --paginate --slurp: a long-lived PR accumulates check runs across every
+            # re-run, and past 100 a required check on a later page is simply absent
+            # from `runs`. `missing` then stays non-empty on every sweep and the PR is
+            # parked forever despite green CI — a silent permanent skip, which is the
+            # one failure a recovery net must not have.
+            runs=$(gh api --paginate --slurp "repos/${REPO}/commits/${head_sha}/check-runs?per_page=100" \
+              | jq -c '[.[].check_runs[] | {name, conclusion}]')
             missing=$(printf '%s' "${REQUIRED_CHECKS}" | jq -r --argjson have "${runs}" '
               .[] as $req
               | select(($have | any(.name == $req and .conclusion == "success")) | not)
@@ -314,31 +343,39 @@ jobs:
               continue
             fi
 
-            # When this SHA became the head — NOT when the commit was written. A
-            # commit's committer date records authorship time, and the two diverge
-            # whenever a commit is prepared before it is pushed: a session that
-            # commits, spends ten minutes on `make check`, and pushes afterwards can
-            # have a re-ping for the OLD head posted in between. Anchored on the
-            # commit date, that new green head reads as "already re-pinged" and the
-            # gate waits forever. Cherry-picks and rebases widen the same gap.
+            # Has Codex reviewed THIS EXACT SHA? Identity, not time.
             #
-            # The earliest check-run start for the SHA is the closest available
-            # proxy: CI starts on push, so it is bounded below by the moment the
-            # commit became the head. We only reach here with every required check
-            # green, so at least one run exists; the committer date remains a
-            # last-resort fallback rather than an assumption.
-            head_seen_at=$(printf '%s' "${runs}" | jq -r '[.[].started_at | select(. != null)] | min // ""')
-            if [ -z "${head_seen_at}" ]; then
-              head_seen_at=$(gh api "repos/${REPO}/commits/${head_sha}" --jq '.commit.committer.date')
-            fi
+            # Two timestamp anchors were tried here and both were wrong in the same
+            # direction: they can read as EARLIER than the moment the commit became
+            # this PR's head, which makes an old trigger look like it covered the new
+            # head, so the gate waits forever. The commit's own date is authorship
+            # time, and diverges whenever a commit is prepared before it is pushed.
+            # The earliest check-run start looked safe — CI starts on push — but the
+            # check-runs endpoint is keyed on the COMMIT, not on this PR: a branch
+            # reset or fast-forward to a SHA that already ran checks on another ref
+            # brings those older runs along, and `min` picks a time from before this
+            # PR ever saw the commit.
+            #
+            # Reviews are per-PR and carry `commit_id`, so "has Codex reviewed this
+            # head" is answerable exactly, with no clock involved. A branch reset, a
+            # cherry-pick or a prepared commit cannot perturb it.
+            #
+            # Reaching this line already means no trigger has been posted since the
+            # gate was applied — that is state 1 above, and it returned. So the only
+            # remaining question is whether the head this gate is open for has been
+            # reviewed:
+            #   reviewed   -> the gate is for a push that has not landed. Touch nothing;
+            #                 posting would re-ping code Codex has already read AND
+            #                 consume the gate, so the push that follows would stall.
+            #   unreviewed -> this head needs a review and no trigger has gone out since
+            #                 the gate opened. Claim and post.
+            reviewed_head=$(gh api --paginate --slurp "repos/${REPO}/pulls/${pr}/reviews?per_page=100" \
+              | jq -r --arg s "${head_sha}" '
+                  [.[][] | select(.user.login == "chatgpt-codex-connector[bot]")
+                         | select(.commit_id == $s)] | length')
 
-            # The gate is open for a push that has not landed yet — the autopilot's
-            # PRESCRIBED ordering (label first, then push), so the common case rather
-            # than an edge one. Touch nothing: posting here would re-ping unchanged
-            # code Codex has already reviewed AND consume the gate, so the push that
-            # follows would find no label and stall.
-            if [ -n "${trigger_at}" ] && [[ "${trigger_at}" > "${head_seen_at}" ]]; then
-              note "| #${pr} | ⏸️ head \`${head_sha:0:10}\` already re-pinged; gate awaits the next push |"
+            if [ "${reviewed_head}" -gt 0 ]; then
+              note "| #${pr} | ⏸️ head \`${head_sha:0:10}\` already reviewed; gate awaits the next push |"
               continue
             fi
 
@@ -378,17 +415,41 @@ jobs:
               # leaving it off: the restored label would then post-date the trigger,
               # so every later sweep reads "gate awaiting the next push" and waits
               # forever. Verify before restoring.
-              if [ -n "$(last_trigger_at "${pr}")" ] && [[ "$(last_trigger_at "${pr}")" > "${claim_at}" ]]; then
+              # `>=`, not `>`. Both `claim_at` and GitHub's `created_at` carry only
+              # second precision, so a comment created in the SAME second as the claim
+              # fails a strict comparison — and the gate is then restored on top of a
+              # trigger that really landed, which is the exact corruption this check
+              # exists to prevent. Erring the other way is harmless: a trigger in that
+              # same second was going out either way, so the gate is correctly consumed.
+              landed=$(last_trigger_at "${pr}")
+              if [ -n "${landed}" ] && [[ ! "${landed}" < "${claim_at}" ]]; then
                 note "| #${pr} | 🔁 **re-pinged** (client error, but the trigger landed) at round ${round} |"
                 echo "::warning::gh exited nonzero on #${pr} but the trigger is present; gate left consumed."
                 continue
               fi
-              gh api -X POST "repos/${REPO}/issues/${pr}/labels" -f "labels[]=${LABEL}" >/dev/null 2>&1 || true
-              note "| #${pr} | ❌ post failed — gate restored, will retry next sweep |"
-              echo "::error::Failed to post the re-ping on #${pr}; gate restored."
+              # A restore that fails is NOT a recoverable state and must never be
+              # reported as one. The gate is already claimed, so a suppressed failure
+              # leaves the PR with neither trigger nor label — invisible to the event
+              # path and to every future sweep, which selects on that label. Fail
+              # loudly, and keep sweeping the rest: one broken PR must not hide the
+              # others. The run exits non-zero at the end.
+              if gh api -X POST "repos/${REPO}/issues/${pr}/labels" -f "labels[]=${LABEL}" >/dev/null 2>&1; then
+                note "| #${pr} | ❌ post failed — gate restored, will retry next sweep |"
+                echo "::error::Failed to post the re-ping on #${pr}; gate restored."
+              else
+                had_fatal=1
+                note "| #${pr} | 🚨 **GATE LOST** — post failed AND restore failed. No trigger and no \`${LABEL}\` label; no later sweep can find this PR. Re-apply the label by hand. |"
+                echo "::error::#${pr} lost its gate: the re-ping failed and the label could not be restored. Manual recovery required."
+              fi
               continue
             fi
 
             note "| #${pr} | 🔁 **re-pinged** (missed by the event path) at round ${round} |"
             echo "Re-pinged #${pr} for ${head_sha}."
           done
+
+          if [ "${had_fatal}" -ne 0 ]; then
+            note ""
+            note "> 🚨 At least one PR lost its gate entirely. See the errors above — each needs its label re-applied by hand."
+            exit 1
+          fi

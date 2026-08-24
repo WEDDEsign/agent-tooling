@@ -223,7 +223,11 @@ jobs:
               "repos/${REPO}/issues/${PR_NUMBER}/comments?per_page=100" \
               | jq -r --arg t "${handle} review" --arg c "${claim_at}" '
                   [.[][] | select((.body | gsub("^\\s+|\\s+$"; "")) == $t)
-                         | select(.created_at > $c)] | length')
+                         | select(.created_at >= $c)] | length')
+            # `>=`, not `>`: both timestamps carry only second precision, so a
+            # comment created in the same second as the claim fails a strict
+            # comparison and the gate is then restored on top of a trigger that
+            # really landed — the exact corruption this check prevents.
             if [ "${landed}" -gt 0 ]; then
               echo "::warning::gh exited nonzero but the trigger is present; leaving the gate consumed."
               exit 0
@@ -231,9 +235,16 @@ jobs:
             # The claim consumed the gate, so without this the PR has no label
             # AND no trigger — an unrecoverable stall. Put it back; the
             # scheduled sweep retries within one interval.
-            GH_TOKEN="${FALLBACK_TOKEN}" gh api -X POST \
+            # A failed restore must never be reported as a restore. The gate is
+            # already claimed, so suppressing this leaves the PR with neither
+            # trigger nor label — invisible to this path and to every sweep,
+            # which selects on that label. Say which of the two happened.
+            if GH_TOKEN="${FALLBACK_TOKEN}" gh api -X POST \
               "repos/${REPO}/issues/${PR_NUMBER}/labels" \
-              -f "labels[]=awaiting-codex-reping" >/dev/null 2>&1 || true
-            echo "::error::Failed to post the re-ping; gate restored for the sweep to retry."
+              -f "labels[]=awaiting-codex-reping" >/dev/null 2>&1; then
+              echo "::error::Failed to post the re-ping; gate restored for the sweep to retry."
+            else
+              echo "::error::#${PR_NUMBER} lost its gate: the re-ping failed AND the label could not be restored. No later sweep can find this PR — re-apply awaiting-codex-reping by hand."
+            fi
             exit 1
           fi
