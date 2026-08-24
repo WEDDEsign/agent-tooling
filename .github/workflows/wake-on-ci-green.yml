@@ -206,12 +206,31 @@ jobs:
           FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eu
+          claim_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           # MUST be exactly "@codex review" with nothing appended — trailing
           # prose flips Codex from review mode into action mode (see header).
           if ! gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "@codex review"; then
-            # The claim already consumed the gate, so failing here would leave
-            # the PR with no label AND no trigger — an unrecoverable stall.
-            # Put it back; the scheduled sweep retries within one interval.
+            # A nonzero exit does NOT prove the comment was not created: a lost
+            # or timed-out response fails the client after GitHub committed the
+            # write. Restoring the gate on top of a trigger that did land is
+            # worse than leaving it off — the restored label would post-date the
+            # trigger, so the sweep would read "gate awaiting the next push" and
+            # wait forever, while another CI completion could claim it and post
+            # a duplicate. Verify first; the trigger is assembled here rather
+            # than written literally so this file keeps exactly one bare mention.
+            handle="@""codex"
+            landed=$(GH_TOKEN="${FALLBACK_TOKEN}" gh api --paginate --slurp \
+              "repos/${REPO}/issues/${PR_NUMBER}/comments?per_page=100" \
+              | jq -r --arg t "${handle} review" --arg c "${claim_at}" '
+                  [.[][] | select((.body | gsub("^\\s+|\\s+$"; "")) == $t)
+                         | select(.created_at > $c)] | length')
+            if [ "${landed}" -gt 0 ]; then
+              echo "::warning::gh exited nonzero but the trigger is present; leaving the gate consumed."
+              exit 0
+            fi
+            # The claim consumed the gate, so without this the PR has no label
+            # AND no trigger — an unrecoverable stall. Put it back; the
+            # scheduled sweep retries within one interval.
             GH_TOKEN="${FALLBACK_TOKEN}" gh api -X POST \
               "repos/${REPO}/issues/${PR_NUMBER}/labels" \
               -f "labels[]=awaiting-codex-reping" >/dev/null 2>&1 || true

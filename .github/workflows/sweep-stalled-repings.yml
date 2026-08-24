@@ -66,14 +66,21 @@ name: Sweep stalled Codex re-pings (reusable)
 # both the newest `labeled` event and the head commit's date:
 #   - trigger AFTER the label      -> the gate was consumed and the event
 #                                     path's removal failed. Clear it, no post.
-#   - trigger AFTER the head, but
-#     the label written later      -> the gate is open for a push that has not
+#   - trigger AFTER the head became
+#     the head, label written later -> the gate is open for a push that has not
 #                                     landed. Touch NOTHING: posting would
 #                                     re-ping code Codex already reviewed and
 #                                     consume the gate, so the push that
 #                                     follows would stall.
 #   - no trigger since this head   -> the re-ping was missed. Claim and post.
-#     appeared
+#     became the head
+#
+# "Became the head" is not the commit's date. A commit prepared before it is
+# pushed — a session that commits, runs `make check` for ten minutes, then
+# pushes — can have a re-ping for the OLD head posted in between, and a
+# committer-date anchor then reads the new green head as already re-pinged.
+# The earliest check-run start for the SHA is used instead: CI starts on push,
+# so it is bounded below by the moment the commit became the head.
 #
 # The middle state is the prescribed ordering, so it is the common case rather
 # than an edge one. An earlier draft of this file had only the first and third,
@@ -166,35 +173,39 @@ jobs:
 
           note() { printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"; }
 
-          # Newest bare-trigger comment on a PR, as an ISO timestamp ("" if
-          # none). Trimmed because a hand-typed trigger often carries trailing
-          # whitespace; a trigger with prose appended is deliberately NOT a
-          # match, since that shape flips Codex into action mode and produces no
-          # review, so it must not count as the gate being satisfied.
+          # `--paginate --slurp`, and the doubled `.[][]`, are both load-bearing.
+          # gh documents that with --paginate alone "Each page is a separate JSON
+          # array or object", so --jq runs on every page independently and `max`
+          # emits one timestamp PER PAGE. The result is a newline-delimited string
+          # whose string comparison is decided by whichever page sorts last, not by
+          # the newest timestamp. --slurp wraps the pages in an outer array, and
+          # .[][] flattens back to the elements, so `max` sees them all at once.
+          # This only bites past 100 comments or events — i.e. exactly the long
+          # loops the pagination was added for.
           last_trigger_at() {
-            gh api --paginate "repos/${REPO}/issues/$1/comments?per_page=100" \
+            gh api --paginate --slurp "repos/${REPO}/issues/$1/comments?per_page=100" \
               | jq -r --arg t "${TRIGGER}" '
-                  [.[] | select((.body | gsub("^\\s+|\\s+$"; "")) == $t) | .created_at]
+                  [.[][] | select((.body | gsub("^\\s+|\\s+$"; "")) == $t) | .created_at]
                   | max // ""'
           }
 
-          # Newest time the gate label was applied ("" if never). The issues
-          # events endpoint is the record of label writes; `--paginate` because
-          # a long autopilot loop accumulates dozens of label events and the
-          # newest is on the LAST page.
           last_labeled_at() {
-            gh api --paginate "repos/${REPO}/issues/$1/events?per_page=100" \
+            gh api --paginate --slurp "repos/${REPO}/issues/$1/events?per_page=100" \
               | jq -r --arg l "${LABEL}" '
-                  [.[] | select(.event == "labeled" and .label.name == $l) | .created_at]
+                  [.[][] | select(.event == "labeled" and .label.name == $l) | .created_at]
                   | max // ""'
           }
 
           note "## Codex re-ping sweep"
           note ""
 
-          # Open issues carrying the gate label; PRs only. `issues` is the
-          # endpoint that filters by label, and PRs are issues to it.
-          prs=$(gh api "repos/${REPO}/issues?state=open&labels=${LABEL}&per_page=100" \
+          # Open issues carrying the gate label; PRs only. `issues` is the endpoint
+          # that filters by label, and PRs are issues to it. --paginate because a
+          # repo with more than 100 gated PRs would otherwise leave every PR past
+          # the first page parked forever — the one failure this workflow must not
+          # have. No --slurp needed here: the filter emits a stream of numbers, and
+          # concatenated pages iterate correctly in the loop below.
+          prs=$(gh api --paginate "repos/${REPO}/issues?state=open&labels=${LABEL}&per_page=100" \
             --jq '.[] | select(.pull_request != null) | .number')
 
           if [ -z "${prs}" ]; then
@@ -211,13 +222,51 @@ jobs:
             head_sha=$(printf '%s' "${info}" | jq -r '.head.sha')
             merge_state=$(printf '%s' "${info}" | jq -r '.mergeable_state')
 
-            # Mirror wake-on-ci-green's hard stop. Without this the sweep would
-            # be a way around the round-25 ceiling, which is the one thing
-            # stopping a runaway loop. Escalate to the PR, not just to this
-            # summary — the human who has to intervene never reads a scheduled
-            # run's logs. Guarded on `loop-stuck` being absent, because unlike
-            # the event path this branch is re-entered every ten minutes and
-            # would otherwise comment forever.
+            # Mergeability is checked BEFORE the green path, not inside it. Check
+            # runs are recorded against the head SHA, so a base-branch update that
+            # conflicts the PR leaves them green and untouched: `missing` comes back
+            # empty and a nested conflict check would never run.
+            case "${merge_state}" in
+              dirty)
+                note "| #${pr} | ⚠️ merge conflict — CI cannot run, needs a base merge (gate left in place) |"
+                continue
+                ;;
+              unknown)
+                # GitHub computes mergeability lazily, so `unknown` means "ask again"
+                # — NOT "probably fine". Letting it through would claim the gate and
+                # re-ping on the strength of check runs that belong to a head GitHub
+                # has not finished evaluating; if it then resolves to `dirty`, the
+                # gate has been consumed against a head whose CI cannot re-run. That
+                # is not self-correcting, because the label is gone. Skipping costs
+                # one interval, and reading the PR is itself what asks GitHub to
+                # compute the value, so the next sweep gets a real answer.
+                note "| #${pr} | ⏳ mergeability still computing — deferring to the next sweep |"
+                continue
+                ;;
+            esac
+
+            labeled_at=$(last_labeled_at "${pr}")
+            trigger_at=$(last_trigger_at "${pr}")
+
+            # Gate satisfaction is evaluated BEFORE the hard stop, and that order is
+            # the whole point. The documented way out of a hard stop is: remove
+            # `loop-stuck`, re-trigger Codex by hand. That leaves `awaiting-codex-reping`
+            # and `codex-round-25` in place, so a hard-stop branch running first would
+            # see `loop-stuck` absent, re-add it and re-escalate — undoing the human's
+            # recovery every ten minutes. Clearing the satisfied gate here retires the
+            # PR from the sweep instead.
+            if [ -n "${trigger_at}" ] && [ -n "${labeled_at}" ] && [[ "${trigger_at}" > "${labeled_at}" ]]; then
+              gh api -X DELETE "repos/${REPO}/issues/${pr}/labels/${LABEL}" >/dev/null 2>&1 || true
+              note "| #${pr} | ✅ gate already satisfied — cleared the stale label |"
+              continue
+            fi
+
+            # Mirror wake-on-ci-green's hard stop. Without it the sweep would be a way
+            # around the round-25 ceiling, which is the one thing stopping a runaway
+            # loop. Escalate to the PR, not just to this summary — the human who has to
+            # intervene never reads a scheduled run's logs. Guarded on `loop-stuck`
+            # being absent, because unlike the event path this branch is re-entered
+            # every ten minutes and would otherwise comment forever.
             round=$(gh api "repos/${REPO}/issues/${pr}/labels" \
               --jq '[.[] | .name | capture("^codex-round-(?<n>[0-9]+)$") | .n | tonumber] | max // 0')
             if [ "${round}" -ge 25 ]; then
@@ -230,11 +279,11 @@ jobs:
                   2>/dev/null || true
                 gh pr edit "${pr}" --repo "${REPO}" --add-label loop-stuck
                 GH_TOKEN="${CEREMONY_PAT}" gh pr comment "${pr}" --repo "${REPO}" \
-                  --body "${ESCALATION_HANDLE} — Codex review autopilot has reached **round ${round}** on this PR with all required checks green. The hard-stop threshold (25) has been crossed; not posting the Codex review trigger.
+                  --body "${ESCALATION_HANDLE} — Codex review autopilot has reached **round ${round}** on this PR. The hard-stop threshold (25) has been crossed; not posting the Codex review trigger.
 
           This was picked up by the scheduled sweep rather than the CI-green event, which means the event was missed as well — the PR would otherwise have sat here silently.
 
-          The \`loop-stuck\` label has been added. To resume the autopilot remove that label and re-trigger Codex manually, or close the loop."
+          The \`loop-stuck\` label has been added. To resume the autopilot, remove that label and re-trigger Codex manually; the sweep treats the manual trigger as satisfying the gate and will not re-escalate. To stop instead, remove the \`${LABEL}\` label."
                 note "| #${pr} | ⛔ round ${round} — hard stop, escalated and labelled \`loop-stuck\` |"
               else
                 note "| #${pr} | ⛔ round ${round} — hard stop, already escalated |"
@@ -242,29 +291,18 @@ jobs:
               continue
             fi
 
-            # Conflicts are checked BEFORE the green path, not inside it. Check
-            # runs are recorded against the head SHA, so a base-branch update
-            # that conflicts the PR leaves those checks green and untouched:
-            # `missing` comes back empty and a nested conflict check never runs.
-            # The sweep would then post against a head whose CI cannot re-run
-            # and consume the gate, which is worse than doing nothing.
-            if [ "${merge_state}" = "dirty" ]; then
-              note "| #${pr} | ⚠️ merge conflict — CI cannot run, needs a base merge (gate left in place) |"
-              continue
-            fi
-
-            # Every required check must be success for the CURRENT head. Same
-            # jq shape as wake-on-ci-green: bind \$req so the inner .name
-            # comparison is not shadowed by jq's rebinding of `.`.
-            have=$(gh api "repos/${REPO}/commits/${head_sha}/check-runs?per_page=100" \
-              --jq '[.check_runs[] | {name, conclusion}]')
-            missing=$(printf '%s' "${REQUIRED_CHECKS}" | jq -r --argjson have "${have}" '
+            # Every required check must be success for the CURRENT head. Same jq shape
+            # as wake-on-ci-green: bind $req so the inner .name comparison is not
+            # shadowed by jq's rebinding of `.`.
+            runs=$(gh api "repos/${REPO}/commits/${head_sha}/check-runs?per_page=100" \
+              --jq '[.check_runs[] | {name, conclusion, started_at}]')
+            missing=$(printf '%s' "${REQUIRED_CHECKS}" | jq -r --argjson have "${runs}" '
               .[] as $req
               | select(($have | any(.name == $req and .conclusion == "success")) | not)
               | $req')
 
             if [ -n "${missing}" ]; then
-              blocked=$(printf '%s' "${REQUIRED_CHECKS}" | jq -r --argjson have "${have}" '
+              blocked=$(printf '%s' "${REQUIRED_CHECKS}" | jq -r --argjson have "${runs}" '
                 .[] as $req
                 | ($have[] | select(.name == $req and (.conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "skipped")))
                 | "\($req): \(.conclusion)"' || true)
@@ -276,66 +314,75 @@ jobs:
               continue
             fi
 
-            labeled_at=$(last_labeled_at "${pr}")
-            trigger_at=$(last_trigger_at "${pr}")
-            head_date=$(gh api "repos/${REPO}/commits/${head_sha}" --jq '.commit.committer.date')
-
-            # Three states, and collapsing any two of them breaks the loop.
+            # When this SHA became the head — NOT when the commit was written. A
+            # commit's committer date records authorship time, and the two diverge
+            # whenever a commit is prepared before it is pushed: a session that
+            # commits, spends ten minutes on `make check`, and pushes afterwards can
+            # have a re-ping for the OLD head posted in between. Anchored on the
+            # commit date, that new green head reads as "already re-pinged" and the
+            # gate waits forever. Cherry-picks and rebases widen the same gap.
             #
-            # 1. Trigger AFTER the label -> the gate was consumed and the event
-            #    path's removal failed. Clear it; do not post again.
-            if [ -n "${trigger_at}" ] && [ -n "${labeled_at}" ] && [[ "${trigger_at}" > "${labeled_at}" ]]; then
-              gh api -X DELETE "repos/${REPO}/issues/${pr}/labels/${LABEL}" >/dev/null 2>&1 || true
-              note "| #${pr} | ✅ gate already satisfied — cleared the stale label |"
-              continue
+            # The earliest check-run start for the SHA is the closest available
+            # proxy: CI starts on push, so it is bounded below by the moment the
+            # commit became the head. We only reach here with every required check
+            # green, so at least one run exists; the committer date remains a
+            # last-resort fallback rather than an assumption.
+            head_seen_at=$(printf '%s' "${runs}" | jq -r '[.[].started_at | select(. != null)] | min // ""')
+            if [ -z "${head_seen_at}" ]; then
+              head_seen_at=$(gh api "repos/${REPO}/commits/${head_sha}" --jq '.commit.committer.date')
             fi
 
-            # 2. This head has already been re-pinged, and the label was written
-            #    afterwards -> the gate is open for a push that has not landed
-            #    yet. This is the autopilot's PRESCRIBED ordering (label first,
-            #    then push), so it is the common case, not an edge one: at label
-            #    time the head is still the previous commit, already green
-            #    because that is what triggered the review being fixed.
-            #
-            #    Touch nothing. Posting here would re-ping unchanged code that
-            #    Codex has already reviewed AND consume the gate, so the push
-            #    that follows would find no label and stall — the sweep causing
-            #    the exact failure it exists to prevent, on the happy path.
-            if [ -n "${trigger_at}" ] && [[ "${trigger_at}" > "${head_date}" ]]; then
+            # The gate is open for a push that has not landed yet — the autopilot's
+            # PRESCRIBED ordering (label first, then push), so the common case rather
+            # than an edge one. Touch nothing: posting here would re-ping unchanged
+            # code Codex has already reviewed AND consume the gate, so the push that
+            # follows would find no label and stall.
+            if [ -n "${trigger_at}" ] && [[ "${trigger_at}" > "${head_seen_at}" ]]; then
               note "| #${pr} | ⏸️ head \`${head_sha:0:10}\` already re-pinged; gate awaits the next push |"
               continue
             fi
 
-            # 3. Green, gated, and no trigger since this head appeared -> the
-            #    re-ping was missed. This is what the sweep is for.
-
-            # Claim the gate. GitHub's label delete is atomic, so if the event
-            # path is mid-post its own delete either already won (404 here) or
-            # is about to lose. Only the winner may post.
+            # Claim the gate. GitHub's label delete is atomic, so if the event path is
+            # mid-post its own delete either already won (404 here) or is about to
+            # lose. Only the winner may post.
+            claim_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
             if ! gh api -X DELETE "repos/${REPO}/issues/${pr}/labels/${LABEL}" >/dev/null 2>&1; then
               note "| #${pr} | 🤝 gate claimed by the event path — standing down |"
               continue
             fi
 
-            # Re-read after claiming: the event path may have posted just before
-            # our delete landed. The gate is correctly consumed either way, so
-            # there is nothing to undo — only a duplicate comment to avoid.
+            # Re-read after claiming: the event path may have posted just before our
+            # delete landed. The gate is correctly consumed either way, so there is
+            # nothing to undo — only a duplicate comment to avoid.
             if [ -n "$(last_trigger_at "${pr}")" ] && [[ "$(last_trigger_at "${pr}")" > "${labeled_at:-}" ]]; then
               note "| #${pr} | 🤝 event path posted first — gate consumed, no duplicate |"
               continue
             fi
 
+            # Advisory only, and deliberately NOT allowed to abort the run. The gate is
+            # already claimed at this point, so `set -e` on a failed advisory would exit
+            # before the trigger AND before the restore below, leaving the PR with
+            # neither — undiscoverable by any later sweep. A missing advisory costs a
+            # human one nudge; a missing trigger costs the loop.
             if [ "${round}" -ge 10 ]; then
-              # Separate comment, never appended to the trigger: trailing prose
-              # flips Codex from review mode into action mode.
-              GH_TOKEN="${CEREMONY_PAT}" gh pr comment "${pr}" --repo "${REPO}" \
-                --body "${ESCALATION_HANDLE} — Codex review autopilot is at **round ${round}** on this PR, recovered by the scheduled sweep. Re-pinging Codex automatically (next comment). If this loop is oscillating (round N's findings ≈ round N-2's), consider stepping in. Hard-stop at round 25."
+              if ! GH_TOKEN="${CEREMONY_PAT}" gh pr comment "${pr}" --repo "${REPO}" \
+                --body "${ESCALATION_HANDLE} — Codex review autopilot is at **round ${round}** on this PR, recovered by the scheduled sweep. Re-pinging Codex automatically (next comment). If this loop is oscillating (round N's findings ≈ round N-2's), consider stepping in. Hard-stop at round 25."; then
+                echo "::warning::Soft-warn comment failed on #${pr}; continuing to the trigger, which is the part that matters."
+              fi
             fi
 
             if ! GH_TOKEN="${CEREMONY_PAT}" gh pr comment "${pr}" --repo "${REPO}" --body "${TRIGGER}"; then
-              # Put the gate back rather than leaving the PR with no claim and
-              # no trigger — that is an unrecoverable stall. The next sweep
-              # retries it.
+              # A nonzero exit does not prove the comment was not created — a lost or
+              # timed-out response fails the client after GitHub committed the write.
+              # Restoring the gate on top of a trigger that DID land is worse than
+              # leaving it off: the restored label would then post-date the trigger,
+              # so every later sweep reads "gate awaiting the next push" and waits
+              # forever. Verify before restoring.
+              if [ -n "$(last_trigger_at "${pr}")" ] && [[ "$(last_trigger_at "${pr}")" > "${claim_at}" ]]; then
+                note "| #${pr} | 🔁 **re-pinged** (client error, but the trigger landed) at round ${round} |"
+                echo "::warning::gh exited nonzero on #${pr} but the trigger is present; gate left consumed."
+                continue
+              fi
               gh api -X POST "repos/${REPO}/issues/${pr}/labels" -f "labels[]=${LABEL}" >/dev/null 2>&1 || true
               note "| #${pr} | ❌ post failed — gate restored, will retry next sweep |"
               echo "::error::Failed to post the re-ping on #${pr}; gate restored."
