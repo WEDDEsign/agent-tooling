@@ -1,0 +1,227 @@
+name: Sweep stalled Codex re-pings (reusable)
+
+# The recovery net under `wake-on-ci-green`.
+#
+# THE BUG THIS EXISTS FOR
+# `wake-on-ci-green` is edge-triggered: it fires on `workflow_run: completed`
+# and reads the `awaiting-codex-reping` label *at that instant*. On a small PR
+# the required checks finish ~3 minutes after a push, so a session that writes
+# the label a moment later loses the race — the evaluation has already run and
+# skipped, and nothing re-runs it, because no further CI completion is coming.
+# There is no error, no retry and no signal; the loop simply stops, and the
+# only recovery is a human noticing a parked PR and re-pinging by hand.
+#
+# The autopilot's answer has been to document the correct order ("label first,
+# then push"). That cannot close a race: a session can follow the instruction
+# and still lose. So this workflow is level-triggered instead — it asks "which
+# PRs are, right now, labelled and green and un-re-pinged?" on a schedule.
+# Whenever the label lands, the next sweep picks it up. Ordering stops
+# mattering.
+#
+# WHY CRON AND NOT A `pull_request: labeled` TRIGGER
+# The obvious fix — fire when the label is added — was built, reviewed and
+# withdrawn (agent-tooling#6). Two reasons, both fatal:
+#   1. P1. `pull_request` runs the caller workflow from the PR's own branch,
+#      and for same-repository branches secrets are still provided. Any PR that
+#      edits its own caller would run the edited version with CEREMONY_PAT
+#      available — a human-identity token with write access across these repos.
+#      That is these repos' normal operating mode, not an edge case.
+#      `pull_request_target` closes that hole but hands secrets to a trigger
+#      with attacker-influenced payload, and its guard must stay correct
+#      forever across four consumers.
+#   2. It breaks the correct ordering to rescue the wrong one. At label time
+#      under "label first, then push", the head is still the PREVIOUS commit —
+#      already green, because that is what triggered the last re-ping. The
+#      labeled path would fire immediately, re-ping against stale code, and
+#      consume the label, leaving the real push's CI-green with nothing to do.
+#
+# `schedule` runs only from the default branch, so PR-authored workflow code
+# never executes and no PR can reach the PAT. The P1 is structurally impossible
+# rather than guarded against.
+#
+# WHAT IT FIXES, AND WHAT IT ONLY MAKES VISIBLE
+# Fixed outright:
+#   - the missed-label race above;
+#   - a content-free Codex pass arriving when CI is ALREADY green. No further
+#     CI completion is coming, and label writes do not emit `workflow_run`, so
+#     today that state needs a human to re-run a workflow by hand.
+# Surfaced but NOT fixed — these appear in the run summary instead of being
+# invisible, and still need a person:
+#   - a merge conflict, which stops CI from running at all (GitHub cannot
+#     compute the merge commit), so there are no green checks to re-ping
+#     against and no `pull_request` event either;
+#   - required checks that were cancelled or timed out. `wake-on-ci-red` fires
+#     on `failure` only, so those wake nothing while also not being a pass.
+# Claiming the sweep "handles" those would be wrong. It reports them.
+#
+# IDEMPOTENCY
+# This runs concurrently with `wake-on-ci-green`, and removing the label after
+# posting is not mutual exclusion (upheld P2 on agent-tooling#6): both paths
+# could post before either removes it. So the check is per-head and reads live
+# state — has a bare-trigger comment been posted since the current head commit
+# was authored? If yes, the re-ping for this head already went out, whichever
+# path sent it, and the sweep only clears the stale label. That is exact rather
+# than advisory, and it also repairs the case where the event path posted but
+# its label removal failed.
+
+on:
+  workflow_call:
+    inputs:
+      required_checks:
+        description: 'JSON array of required check-run names that must all be success. Use the SAME value as the wake-on-ci-green caller — a narrower list here would re-ping against checks that path considers incomplete. e.g. ["Backend (pytest)","Frontend (tsc + build)"]'
+        type: string
+        required: true
+      escalation_handle:
+        type: string
+        default: '@WEDDEsign'
+      label:
+        description: 'The mid-loop gate label the sweep looks for.'
+        type: string
+        default: 'awaiting-codex-reping'
+
+    secrets:
+      CEREMONY_PAT:
+        required: true
+
+permissions:
+  pull-requests: write
+  issues: write
+  contents: read
+  checks: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+
+    # Two sweeps must never overlap: both would read the same un-re-pinged PR
+    # before either posted, and the per-head check below cannot see a comment
+    # that has not been made yet. `cancel-in-progress: false` because a sweep
+    # mid-post should finish rather than be truncated between the comment and
+    # the label removal. Declared on the job rather than the workflow so it is
+    # claimed by the run that actually does work (NordScope#1198).
+    concurrency:
+      group: codex-reping-sweep
+      cancel-in-progress: false
+
+    steps:
+      - name: Sweep labelled PRs for a missed re-ping
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CEREMONY_PAT: ${{ secrets.CEREMONY_PAT }}
+          REPO: ${{ github.repository }}
+          REQUIRED_CHECKS: ${{ inputs.required_checks }}
+          ESCALATION_HANDLE: ${{ inputs.escalation_handle }}
+          LABEL: ${{ inputs.label }}
+        run: |
+          set -euo pipefail
+
+          # Assembled at runtime so this file does not contain the literal
+          # mention outside the one place scripts/check-codex-mentions.sh
+          # permits. Built ONCE and used for both detection and posting, so the
+          # two can never drift apart — a detector that looked for a different
+          # string than the poster sends would re-ping on every sweep.
+          HANDLE="@""codex"
+          TRIGGER="${HANDLE} review"
+
+          # 13 = length of the canonical bare trigger. Assert rather than trust
+          # the concatenation: a typo there posts a string Codex ignores, and
+          # the loop then stalls silently — the exact failure this workflow
+          # exists to end, reintroduced by the fix for it.
+          if [ "${#TRIGGER}" -ne 13 ]; then
+            echo "::error::Assembled Codex trigger is malformed (${#TRIGGER} chars). Refusing to post."
+            exit 1
+          fi
+
+          note() { printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"; }
+
+          note "## Codex re-ping sweep"
+          note ""
+
+          # Open issues carrying the gate label; PRs only. `issues` is the
+          # endpoint that filters by label, and PRs are issues to it.
+          prs=$(gh api "repos/${REPO}/issues?state=open&labels=${LABEL}&per_page=100" \
+            --jq '.[] | select(.pull_request != null) | .number')
+
+          if [ -z "${prs}" ]; then
+            note "No open PRs carry \`${LABEL}\`. Nothing to sweep."
+            echo "No labelled PRs."
+            exit 0
+          fi
+
+          note "| PR | Outcome |"
+          note "| --- | --- |"
+
+          for pr in ${prs}; do
+            info=$(gh api "repos/${REPO}/pulls/${pr}")
+            head_sha=$(printf '%s' "${info}" | jq -r '.head.sha')
+            merge_state=$(printf '%s' "${info}" | jq -r '.mergeable_state')
+
+            # Mirror wake-on-ci-green's hard stop. Without this the sweep would
+            # be a way around the round-25 ceiling, which is the one thing
+            # stopping a runaway loop.
+            round=$(gh api "repos/${REPO}/issues/${pr}/labels" \
+              --jq '[.[] | .name | capture("^codex-round-(?<n>[0-9]+)$") | .n | tonumber] | max // 0')
+            if [ "${round}" -ge 25 ]; then
+              note "| #${pr} | ⛔ round ${round} — hard stop, not re-pinging |"
+              continue
+            fi
+
+            # Every required check must be success for the CURRENT head. Same
+            # jq shape as wake-on-ci-green: bind \$req so the inner .name
+            # comparison is not shadowed by jq's rebinding of `.`.
+            have=$(gh api "repos/${REPO}/commits/${head_sha}/check-runs?per_page=100" \
+              --jq '[.check_runs[] | {name, conclusion}]')
+            missing=$(printf '%s' "${REQUIRED_CHECKS}" | jq -r --argjson have "${have}" '
+              .[] as $req
+              | select(($have | any(.name == $req and .conclusion == "success")) | not)
+              | $req')
+
+            if [ -n "${missing}" ]; then
+              # Distinguish the two shapes a person has to act on differently.
+              if [ "${merge_state}" = "dirty" ]; then
+                note "| #${pr} | ⚠️ merge conflict — CI cannot run, needs a base merge |"
+              else
+                blocked=$(printf '%s' "${REQUIRED_CHECKS}" | jq -r --argjson have "${have}" '
+                  .[] as $req
+                  | ($have[] | select(.name == $req and (.conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "skipped")))
+                  | "\($req): \(.conclusion)"' || true)
+                if [ -n "${blocked}" ]; then
+                  note "| #${pr} | ⚠️ terminal non-failure check, wakes nothing — needs a re-run: $(printf '%s' "${blocked}" | tr '\n' ';') |"
+                else
+                  note "| #${pr} | ⏳ checks not green yet |"
+                fi
+              fi
+              continue
+            fi
+
+            # Has a re-ping already gone out for THIS head? `since` filters on
+            # updated_at, so re-check created_at in jq — an old comment edited
+            # recently must not count as a fresh re-ping. Body is trimmed
+            # because a hand-typed trigger often carries trailing whitespace.
+            head_date=$(gh api "repos/${REPO}/commits/${head_sha}" --jq '.commit.committer.date')
+            comments=$(gh api "repos/${REPO}/issues/${pr}/comments?since=${head_date}&per_page=100")
+            already=$(printf '%s' "${comments}" | jq --arg t "${TRIGGER}" --arg d "${head_date}" '
+              [.[] | select(.created_at >= $d)
+                   | select((.body | gsub("^\\s+|\\s+$"; "")) == $t)] | length')
+
+            if [ "${already}" -gt 0 ]; then
+              # The event path won the race and got there first. Clear the
+              # label it failed to remove; do not post a second trigger.
+              gh api -X DELETE "repos/${REPO}/issues/${pr}/labels/${LABEL}" >/dev/null 2>&1 || true
+              note "| #${pr} | ✅ already re-pinged for \`${head_sha:0:10}\` — cleared stale label |"
+              continue
+            fi
+
+            if [ "${round}" -ge 10 ]; then
+              # Separate comment, never appended to the trigger: trailing prose
+              # flips Codex from review mode into action mode.
+              GH_TOKEN="${CEREMONY_PAT}" gh pr comment "${pr}" --repo "${REPO}" \
+                --body "${ESCALATION_HANDLE} — Codex review autopilot is at **round ${round}** on this PR, recovered by the scheduled sweep. Re-pinging Codex automatically (next comment). If this loop is oscillating (round N's findings ≈ round N-2's), consider stepping in. Hard-stop at round 25."
+            fi
+
+            GH_TOKEN="${CEREMONY_PAT}" gh pr comment "${pr}" --repo "${REPO}" --body "${TRIGGER}"
+            gh api -X DELETE "repos/${REPO}/issues/${pr}/labels/${LABEL}" >/dev/null 2>&1 || true
+
+            note "| #${pr} | 🔁 **re-pinged** (missed by the event path) at round ${round} |"
+            echo "Re-pinged #${pr} for ${head_sha}."
+          done
