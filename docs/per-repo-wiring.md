@@ -56,6 +56,38 @@ repo-specific values, and add the `CEREMONY_PAT` secret.
   workflow-scoped token (or committed through the GitHub UI). This is the one
   hard blocker for landing the server-side plane via automation.
 
+### The re-ping sweep (add it with wake-on-ci-green, not instead of it)
+
+`wake-on-ci-green` is **edge-triggered**: it reads `awaiting-codex-reping` at
+the instant a CI workflow completes — roughly three minutes after a push on a
+small PR. A session that writes the label a moment later loses the race. The
+evaluation has already run and skipped, and nothing re-runs it, because no
+further CI completion is coming. There is no error and no retry; the loop just
+parks until a human notices and re-pings by hand. Documenting the correct order
+("label first, then push") cannot close a race — a session can follow the
+instruction and still lose.
+
+`sweep-stalled-repings` is the **level-triggered** counterpart. On a schedule it
+asks "which PRs are, right now, labelled and green and un-re-pinged?", so
+whenever the label lands the next sweep picks it up. Copy its caller alongside
+the `wake-on-ci-green` one and give both the **same** `required_checks` value;
+a narrower list in the sweep would re-ping against checks the event path still
+considers incomplete.
+
+It is deliberately a `schedule`, not a `pull_request: labeled` trigger. The
+labeled version was built and withdrawn (agent-tooling#6): `pull_request` runs
+the caller from the PR's own branch with secrets still provided, so any PR that
+edited its own caller would run the edited file with `CEREMONY_PAT` available.
+Cron runs only from the default branch, so PR-authored workflow code never
+executes.
+
+What it fixes outright: the missed-label race, and a content-free Codex pass
+arriving when CI is already green (no further CI completion is coming, and
+label writes do not emit `workflow_run`). What it only **surfaces**, in the run
+summary, because they still need a person: a merge conflict (CI cannot run at
+all, so there is nothing green to re-ping against) and required checks that were
+cancelled or timed out (`wake-on-ci-red` fires on `failure` only).
+
 ### Reusable-workflow notes
 
 - **Each caller needs its own `permissions:` block.** A called (reusable)

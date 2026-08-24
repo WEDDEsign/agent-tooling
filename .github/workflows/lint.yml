@@ -20,3 +20,17 @@ jobs:
       - uses: actions/checkout@v4
       - name: No Codex mentions outside the bare review trigger
         run: bash scripts/check-codex-mentions.sh
+
+  decision-logic:
+    name: Decision logic
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The jq filters and shell comparisons inside the wake-* workflows, run
+      # against fixtures. Five rounds of review on the sweep turned up 25 real
+      # defects, nearly all of them in these expressions; without this they are
+      # enforced by nothing and the next edit can silently undo any of them.
+      # Includes a drift guard, so the assertions cannot pass against a copy
+      # while the shipped workflow says something else.
+      - name: Decision logic holds
+        run: bash scripts/test-decision-logic.sh

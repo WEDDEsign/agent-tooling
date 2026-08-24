@@ -82,8 +82,8 @@ jobs:
           REQUIRED_CHECKS: ${{ inputs.required_checks }}
         run: |
           set -eu
-          has_label=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/labels" \
-            --jq '[.[] | select(.name == "awaiting-codex-reping")] | length')
+          has_label=$(gh api --paginate --slurp "repos/${REPO}/issues/${PR_NUMBER}/labels?per_page=100" \
+            | jq -r '[.[][] | select(.name == "awaiting-codex-reping")] | length')
           if [ "${has_label}" = "0" ]; then
             echo "PR #${PR_NUMBER} not awaiting Codex re-ping — skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -94,8 +94,13 @@ jobs:
           # running. Verify EVERY required check-run name is success for this
           # SHA before waking Claude. required_checks is a JSON array, so names
           # with spaces/parens are handled.
-          have=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs?per_page=100" \
-            --jq '[.check_runs[] | {name, conclusion}]')
+          # --paginate --slurp: check runs accumulate across every re-run, and
+          # past 100 a required check on a later page is simply absent from
+          # `have`, so `missing` stays non-empty and the re-ping never fires
+          # despite green CI. Same defect the sweep carries; same fix.
+          have=$(gh api --paginate --slurp \
+            "repos/${REPO}/commits/${HEAD_SHA}/check-runs?per_page=100" \
+            | jq -c '[.[].check_runs[] | {name, conclusion}]')
           # For each required check NAME ($req), it is "missing" unless some
           # check-run with that name concluded success. Bind $req so the inner
           # `.name` comparison isn't shadowed by jq's `.` rebinding.
@@ -121,8 +126,8 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
         run: |
           set -eu
-          n=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/labels" \
-            --jq '[.[] | .name | capture("^codex-round-(?<n>[0-9]+)$") | .n | tonumber] | max // 0')
+          n=$(gh api --paginate --slurp "repos/${REPO}/issues/${PR_NUMBER}/labels?per_page=100" \
+            | jq -r '[.[][] | .name | capture("^codex-round-(?<n>[0-9]+)$") | .n | tonumber] | max // 0')
           echo "round=${n}" >> "$GITHUB_OUTPUT"
           if [ "${n}" -ge 25 ]; then
             echo "mode=hardstop" >> "$GITHUB_OUTPUT"
@@ -165,19 +170,22 @@ jobs:
           set -eu
           gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot is at **round ${ROUND}** on this PR. Re-pinging Codex automatically (next comment). If this loop is oscillating (round N's findings ≈ round N-2's), consider stepping in. Hard-stop at round 25."
 
-      - name: Re-ping Codex (bare trigger, posted directly)
-        if: steps.gate.outputs.skip != 'true' && steps.round.outputs.mode != 'hardstop'
-        env:
-          GH_TOKEN: ${{ secrets.CEREMONY_PAT }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
-        run: |
-          set -eu
-          # MUST be exactly "@codex review" with nothing appended — trailing
-          # prose flips Codex from review mode into action mode (see header).
-          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "@codex review"
-
-      - name: Remove awaiting-codex-reping label
+      # The label removal comes BEFORE the post, and is the claim rather than
+      # the cleanup. `sweep-stalled-repings` runs on a schedule and can evaluate
+      # the same PR at the same moment; it is a different workflow, so no
+      # concurrency group can serialize the two, and a group shared with this
+      # one would be actively harmful — GitHub cancels a previously *pending*
+      # run when a new one queues, and CI completions arrive far too often for
+      # that (NordScope#1198). Posting and then removing is not mutual
+      # exclusion either: both paths can observe the label, and both post,
+      # before either removal is visible.
+      #
+      # GitHub's label delete is atomic, so making it the claim gives exactly
+      # one winner. A 404 means the sweep got there first and this run stands
+      # down. `|| true` is deliberately NOT used — losing the claim must be
+      # distinguishable from winning it.
+      - name: Claim the gate (remove awaiting-codex-reping)
+        id: claim
         if: steps.gate.outputs.skip != 'true' && steps.round.outputs.mode != 'hardstop'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -185,6 +193,68 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
         run: |
           set -eu
-          gh api -X DELETE \
+          if gh api -X DELETE \
             "repos/${REPO}/issues/${PR_NUMBER}/labels/awaiting-codex-reping" \
-            || true
+            >/dev/null 2>&1; then
+            echo "won=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "The gate label was already gone — the scheduled sweep claimed it. Standing down."
+            echo "won=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Re-ping Codex (bare trigger, posted directly)
+        if: steps.claim.outputs.won == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CEREMONY_PAT }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          claim_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          # MUST be exactly "@codex review" with nothing appended — trailing
+          # prose flips Codex from review mode into action mode (see header).
+          if ! gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "@codex review"; then
+            # A nonzero exit does NOT prove the comment was not created: a lost
+            # or timed-out response fails the client after GitHub committed the
+            # write. Restoring the gate on top of a trigger that did land is
+            # worse than leaving it off — the restored label would post-date the
+            # trigger, so the sweep would read "gate awaiting the next push" and
+            # wait forever, while another CI completion could claim it and post
+            # a duplicate. Verify first; the trigger is assembled here rather
+            # than written literally so this file keeps exactly one bare mention.
+            handle="@""codex"
+            # `|| true` below: the outage that made the post fail is exactly
+            # what makes this read fail too, and `set -eu` would then exit
+            # before either branch — losing the gate precisely when it matters.
+            # An unknown answer resolves toward restoring, the recoverable side.
+            landed=$(GH_TOKEN="${FALLBACK_TOKEN}" gh api --paginate --slurp \
+              "repos/${REPO}/issues/${PR_NUMBER}/comments?per_page=100" \
+              | jq -r --arg t "${handle} review" --arg c "${claim_at}" '
+                  [.[][] | select((.body | gsub("^\\s+|\\s+$"; "")) == $t)
+                         | select(.created_at >= $c)] | length' || true)
+            landed="${landed:-0}"
+            # `>=`, not `>`: both timestamps carry only second precision, so a
+            # comment created in the same second as the claim fails a strict
+            # comparison and the gate is then restored on top of a trigger that
+            # really landed — the exact corruption this check prevents.
+            if [ "${landed}" -gt 0 ]; then
+              echo "::warning::gh exited nonzero but the trigger is present; leaving the gate consumed."
+              exit 0
+            fi
+            # The claim consumed the gate, so without this the PR has no label
+            # AND no trigger — an unrecoverable stall. Put it back; the
+            # scheduled sweep retries within one interval.
+            # A failed restore must never be reported as a restore. The gate is
+            # already claimed, so suppressing this leaves the PR with neither
+            # trigger nor label — invisible to this path and to every sweep,
+            # which selects on that label. Say which of the two happened.
+            if GH_TOKEN="${FALLBACK_TOKEN}" gh api -X POST \
+              "repos/${REPO}/issues/${PR_NUMBER}/labels" \
+              -f "labels[]=awaiting-codex-reping" >/dev/null 2>&1; then
+              echo "::error::Failed to post the re-ping; gate restored for the sweep to retry."
+            else
+              echo "::error::#${PR_NUMBER} lost its gate: the re-ping failed AND the label could not be restored. No later sweep can find this PR — re-apply awaiting-codex-reping by hand."
+            fi
+            exit 1
+          fi

@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   call:
-    uses: WEDDEsign/agent-tooling/.github/workflows/wake-on-ci-red.yml@v0.1.0
+    uses: WEDDEsign/agent-tooling/.github/workflows/wake-on-ci-red.yml@v0.1.5
     with:
       escalation_handle: '@WEDDEsign'
     secrets:

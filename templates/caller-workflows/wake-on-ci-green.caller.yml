@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   call:
-    uses: WEDDEsign/agent-tooling/.github/workflows/wake-on-ci-green.yml@v0.1.0
+    uses: WEDDEsign/agent-tooling/.github/workflows/wake-on-ci-green.yml@v0.1.5
     with:
       # JSON array string. Names with spaces/parens are fine.
       required_checks: '["Backend (pytest)","Backend integration (Firestore emulator)","Frontend (tsc + build)"]'

@@ -2,7 +2,7 @@
 #
 # Fill in: escalation_handle, required_checks_text. Requires the repo to have a
 # `CEREMONY_PAT` secret (fine-grained PAT, pull-requests:write) — see
-# docs/per-repo-wiring.md. Pin @v0.1.0 to a newer tag as it's released.
+# docs/per-repo-wiring.md. Pin @v0.1.5 to a newer tag as it's released.
 #
 # The `permissions:` block is REQUIRED: a called (reusable) workflow cannot
 # request more than the caller's token grants, and most repos default to a
@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   call:
-    uses: WEDDEsign/agent-tooling/.github/workflows/wake-on-codex-review.yml@v0.1.0
+    uses: WEDDEsign/agent-tooling/.github/workflows/wake-on-codex-review.yml@v0.1.5
     with:
       escalation_handle: '@WEDDEsign'
       required_checks_text: 'the required checks'   # e.g. '`Backend (pytest)`, `Frontend (tsc + build)`'

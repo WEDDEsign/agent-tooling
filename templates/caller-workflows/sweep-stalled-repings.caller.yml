@@ -1,0 +1,48 @@
+# Per-repo caller — copy to <repo>/.github/workflows/sweep-stalled-repings.yml
+#
+# The recovery net under wake-on-ci-green. That workflow is edge-triggered and
+# reads the `awaiting-codex-reping` label at the instant CI completes, so a
+# session that labels a moment late loses the race silently and the loop parks.
+# This sweep asks the same question on a schedule instead, so ordering stops
+# mattering. Add it ALONGSIDE wake-on-ci-green — it does not replace it; the
+# event path stays the fast lane and this only catches what fell through.
+#
+# Fill in ONE repo-specific value:
+#   `required_checks` — a JSON array of check-RUN names. Use the SAME value as
+#   this repo's wake-on-ci-green caller. A narrower list here would re-ping
+#   against checks the event path considers incomplete.
+#
+# The `permissions:` block is REQUIRED (callers must grant what the reusable
+# needs; default tokens are read-only). Requires a `CEREMONY_PAT` secret.
+name: Sweep stalled Codex re-pings
+
+on:
+  schedule:
+    # Every 10 minutes. A stalled loop then recovers within one interval
+    # instead of never. GitHub's minimum granularity is 5 minutes, and
+    # scheduled runs are best-effort — they can be delayed under load, which is
+    # fine for a recovery net but is why this is not the primary path.
+    #
+    # NOTE: GitHub disables scheduled workflows after 60 days with no repo
+    # activity. On a quiet repo, re-enable it in the Actions tab.
+    - cron: '*/10 * * * *'
+
+  # So a human can force a sweep the moment they notice a parked PR, rather
+  # than waiting out the interval.
+  workflow_dispatch:
+
+permissions:
+  pull-requests: write
+  issues: write
+  contents: read
+  checks: read
+
+jobs:
+  call:
+    uses: WEDDEsign/agent-tooling/.github/workflows/sweep-stalled-repings.yml@v0.1.5
+    with:
+      # JSON array string. Names with spaces/parens are fine.
+      required_checks: '["Backend (pytest)","Backend integration (Firestore emulator)","Frontend (tsc + build)"]'
+      escalation_handle: '@WEDDEsign'
+    secrets:
+      CEREMONY_PAT: ${{ secrets.CEREMONY_PAT }}

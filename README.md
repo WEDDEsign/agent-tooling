@@ -50,6 +50,7 @@ agent-tooling/
 │   ├── wake-on-codex-review.yml
 │   ├── wake-on-ci-green.yml
 │   ├── wake-on-ci-red.yml
+│   ├── sweep-stalled-repings.yml        # cron recovery net under wake-on-ci-green
 │   ├── auto-resolve-review-threads.yml
 │   └── cleanup-stale-codex-labels.yml
 ├── templates/caller-workflows/          # thin per-repo callers that invoke the reusable workflows
