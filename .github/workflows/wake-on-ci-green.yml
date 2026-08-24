@@ -94,8 +94,13 @@ jobs:
           # running. Verify EVERY required check-run name is success for this
           # SHA before waking Claude. required_checks is a JSON array, so names
           # with spaces/parens are handled.
-          have=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs?per_page=100" \
-            --jq '[.check_runs[] | {name, conclusion}]')
+          # --paginate --slurp: check runs accumulate across every re-run, and
+          # past 100 a required check on a later page is simply absent from
+          # `have`, so `missing` stays non-empty and the re-ping never fires
+          # despite green CI. Same defect the sweep carries; same fix.
+          have=$(gh api --paginate --slurp \
+            "repos/${REPO}/commits/${HEAD_SHA}/check-runs?per_page=100" \
+            | jq -c '[.[].check_runs[] | {name, conclusion}]')
           # For each required check NAME ($req), it is "missing" unless some
           # check-run with that name concluded success. Bind $req so the inner
           # `.name` comparison isn't shadowed by jq's `.` rebinding.
