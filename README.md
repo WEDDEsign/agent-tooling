@@ -52,6 +52,7 @@ agent-tooling/
 │   ├── wake-on-ci-red.yml
 │   ├── sweep-stalled-repings.yml        # cron recovery net under wake-on-ci-green
 │   ├── auto-resolve-review-threads.yml
+│   ├── sweep-unresolved-threads.yml     # cron recovery net under auto-resolve-review-threads
 │   └── cleanup-stale-codex-labels.yml
 ├── templates/caller-workflows/          # thin per-repo callers that invoke the reusable workflows
 ├── labels/                              # canonical label taxonomy + gh sync script

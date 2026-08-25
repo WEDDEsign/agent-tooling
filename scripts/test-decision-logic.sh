@@ -469,8 +469,12 @@ chk "threads sweep asks for the page cursor it pages on" \
 # retry note is only true for a transient failure, and a permission or token
 # problem fails identically on every tick while the run stays green. Shell, not
 # jq, so this is the only thing that can hold it.
-chk "threads sweep counts a failed thread read" \
-  "$(grep -c 'read_fail=$((read_fail + 1))' "$THREADS")" "1"
+chk "threads sweep counts a failed read — thread read AND head re-check" \
+  "$(grep -c 'read_fail=$((read_fail + 1))' "$THREADS")" "2"
+chk "threads sweep stands down on an unreadable head rather than posting" \
+  "$(grep -c 'if \[ -z "${head_now}" \]; then' "$THREADS")" "1"
+chk "threads sweep defers a dirty or unknown mergeable_state" \
+  "$(grep -cE '^ +(dirty|unknown)\)$' "$THREADS")" "2"
 chk "threads sweep exits nonzero on a failed thread read" \
   "$(grep -c 'had_fatal}" -ne 0 ] || \[ "${read_fail}" -ne 0 \]' "$THREADS")" "1"
 chk "threads sweep does not claim a clean sweep after a failed read" \

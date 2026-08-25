@@ -184,7 +184,36 @@ jobs:
           note "| --- | --- |"
 
           for pr in ${prs}; do
-            head_sha=$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha')
+            info=$(gh api "repos/${REPO}/pulls/${pr}")
+            head_sha=$(printf '%s' "${info}" | jq -r '.head.sha')
+            merge_state=$(printf '%s' "${info}" | jq -r '.mergeable_state')
+
+            # Mergeability BEFORE greenness, for the same reason the re-ping
+            # sweep checks it in that order. Check runs are recorded against
+            # the head SHA, so a base-branch advance that conflicts this PR
+            # leaves them green and untouched: `missing` comes back empty, and
+            # a sweep that trusted it would announce "green but unmergeable"
+            # and point at the threads — on a PR whose CI cannot even re-run
+            # until the conflict is resolved. Naming the wrong blocker is
+            # worse than naming none, because this comment exists to tell a
+            # session what is actually stopping it.
+            case "${merge_state}" in
+              dirty)
+                note "| #${pr} | ⚠️ merge conflict — blocked on the conflict, not on threads |"
+                continue
+                ;;
+              unknown)
+                # GitHub computes mergeability lazily, so `unknown` means "ask
+                # again", not "probably fine" — and reading the PR is itself
+                # what asks, so the next sweep gets a real answer. Deferring
+                # costs one interval. Nothing is consumed here the way the
+                # re-ping sweep consumes its gate, but posting on a PR that
+                # then resolves to `dirty` would still write a marker
+                # suppressing the look that mattered.
+                note "| #${pr} | ⏳ mergeability still computing — deferring to the next sweep |"
+                continue
+                ;;
+            esac
 
             # Green first, and cheaply: a PR blocked on CI is not blocked on
             # threads, and skipping it here avoids a GraphQL round-trip per PR
@@ -327,7 +356,22 @@ jobs:
             # write a marker suppressing the next sweep's look at the real
             # head. Re-read and stand down; nothing has been consumed.
             head_now=$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha' || echo "")
-            if [ -n "${head_now}" ] && [ "${head_now}" != "${head_sha}" ]; then
+
+            # An unreadable head is NOT permission to post. `|| echo ""` exists
+            # so a failure here doesn't abort the sweep under `set -e`, and
+            # treating the empty result as "unchanged" would have turned it
+            # into the opposite: post anyway, naming a SHA and a green-check
+            # snapshot that were never re-confirmed, while the real head may be
+            # running or failing CI. Same outcome as a moved head — stand down,
+            # nothing consumed — and counted, because a read that always fails
+            # means a sweep that never posts.
+            if [ -z "${head_now}" ]; then
+              read_fail=$((read_fail + 1))
+              note "| #${pr} | ↩️ could not re-read the head before posting — next sweep re-evaluates |"
+              continue
+            fi
+
+            if [ "${head_now}" != "${head_sha}" ]; then
               note "| #${pr} | ↩️ head moved to \`${head_now:0:10}\` mid-sweep — next sweep re-evaluates |"
               continue
             fi
@@ -372,8 +416,8 @@ jobs:
           # itself. One red run is the cost of a transient hiccup.
           if [ "${read_fail}" -ne 0 ]; then
             note ""
-            note "> 🚨 ${ESCALATION_HANDLE} — review threads could not be read for ${read_fail} PR(s). One tick can be transient; every tick means the sweep is blind."
-            echo "::error::Review-thread read failed for ${read_fail} PR(s); this sweep examined fewer PRs than it enumerated."
+            note "> 🚨 ${ESCALATION_HANDLE} — ${read_fail} PR(s) could not be read: their review threads, or the head re-check taken just before posting. One tick can be transient; every tick means the sweep is blind."
+            echo "::error::A read failed for ${read_fail} PR(s); this sweep examined or reported fewer PRs than it enumerated."
           fi
 
           if [ "${had_fatal}" -ne 0 ] || [ "${read_fail}" -ne 0 ]; then
