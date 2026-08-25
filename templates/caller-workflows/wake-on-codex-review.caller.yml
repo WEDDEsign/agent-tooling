@@ -1,8 +1,18 @@
 # Per-repo caller — copy to <repo>/.github/workflows/wake-on-codex-review.yml
 #
 # Fill in: escalation_handle, required_checks_text. Requires the repo to have a
-# `CEREMONY_PAT` secret (fine-grained PAT, pull-requests:write) — see
-# docs/per-repo-wiring.md. Pin @v0.1.5 to a newer tag as it's released.
+# `CEREMONY_PAT` secret — a CLASSIC PAT carrying the `repo` scope, which
+# includes contents read/write, so it also works as actions/checkout's token.
+# The `workflow` scope is deliberately NOT granted, so no session can push a
+# change under .github/workflows/** with it. See docs/per-repo-wiring.md.
+# Pin @v0.1.5 to a newer tag as it's released.
+#
+# Optional contention inputs (all have defaults; omit unless tuning):
+#   claim_label            label a live session sets to claim a round
+#   claim_lease_minutes    how long that claim is honoured before expiring
+#   claim_settle_seconds   pause before reading it, so the claim isn't raced
+# When a claim is held, the wake-up asks for an independent review and forbids
+# writing, instead of sending a second session to fight for the branch.
 #
 # The `permissions:` block is REQUIRED: a called (reusable) workflow cannot
 # request more than the caller's token grants, and most repos default to a

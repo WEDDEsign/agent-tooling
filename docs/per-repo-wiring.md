@@ -47,9 +47,19 @@ repo-specific values, and add the `CEREMONY_PAT` secret.
 - **`CEREMONY_PAT` secret.** The wake-up comments must be authored by a *human*
   identity — the Claude GitHub App ignores mentions from `github-actions[bot]`
   (bot-to-bot loop guard; NordScope diagnosed this in its PR #305). Create one
-  fine-grained PAT (pull-requests: write on these repos), add it as the
-  `CEREMONY_PAT` repo/org secret. NordScope already has this as `NordscopePAT`
-  — either rename, or map it in the caller (`CEREMONY_PAT: ${{ secrets.NordscopePAT }}`).
+  **classic** PAT carrying the **`repo`** scope, add it as the `CEREMONY_PAT`
+  repo/org secret. Describe it by what it can do rather than what it was meant
+  for: classic `repo` includes contents read/write, so the same token works as
+  `actions/checkout`'s `token` and for fetch and push — the older wording here
+  ("fine-grained, pull-requests: write") understated that and reads as a
+  blocker on any change that hands it to checkout. It is not one. Note this
+  bullet and the next were mutually exclusive as written: `repo` is a classic
+  scope that fine-grained tokens do not have.
+
+  NordScope reads `secrets.CEREMONY_PAT` and always has. An earlier version of
+  this page said it already had the token as `NordscopePAT` and offered a
+  mapping for it; no secret by that name has ever existed there, so following
+  that advice would have wired the callers to an empty secret.
 - **`workflow` token scope.** Pushing files under `.github/workflows/` requires
   a token with the `workflow` scope. The PAT currently in use here has `repo`
   but **not** `workflow`, so these caller files must be pushed with a

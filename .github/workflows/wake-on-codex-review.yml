@@ -17,6 +17,26 @@ name: Wake Claude on Codex review (reusable)
 # Skip cases: APPROVED state / APPROVED token / "no major issues" template /
 # non-Codex author / zero inline comments. Hard-stop at round >= 25 swaps the
 # @Claude wake-up for an escalation_handle ping + `loop-stuck` label.
+#
+# CONTENTION (WEDDEsign/NordScope#1207). A session already subscribed to the PR
+# receives the same review event this workflow fires on, so both wake and both
+# triage the same round. Observed eleven times across three PRs. The waste is
+# real, but suppressing the second session is the wrong fix: on NordScope#1233
+# two of three parallel triages found defects that Codex and the branch-holding
+# session had both missed. So this workflow still wakes a session — it changes
+# what that session is *told*. When a live session holds a claim on the round,
+# the wake-up asks for an independent review and forbids writing; the holder
+# keeps the branch, the labels and the thread replies. Uncoordinated duplication
+# becomes a division of labour.
+#
+# The claim is a label plus its `labeled` timestamp, the same shape the sweep
+# already reads. It carries a LEASE because a session can die mid-round, and a
+# claim that never expires would silently gate every future wake-up on that PR —
+# worse than the duplication it prevents.
+#
+# Backwards compatible and inert until something starts claiming: with no claim
+# label ever applied, every run takes the unclaimed path and behaves exactly as
+# before.
 
 on:
   workflow_call:
@@ -29,6 +49,25 @@ on:
         description: 'Human-readable list of required checks, for the wake-up body.'
         type: string
         default: 'the required checks'
+      claim_label:
+        description: 'Label a live session applies to claim a round. Its `labeled` timestamp is the lease start.'
+        type: string
+        default: 'claude-round-claimed'
+      claim_lease_minutes:
+        description: >-
+          How long a claim is honoured. After this the round is treated as
+          unclaimed, so a session that died mid-round cannot gate the PR
+          forever. Keep it comfortably longer than a triage takes.
+        type: number
+        default: 15
+      claim_settle_seconds:
+        description: >-
+          How long to wait before reading the claim. A live session receives
+          this same review event, so it may not have written its claim when the
+          workflow starts — reading immediately would race it and lose. Costs
+          this much latency only on rounds nobody claims.
+        type: number
+        default: 60
     secrets:
       CEREMONY_PAT:
         description: 'Fine-grained PAT used to author wake-up / escalation comments as a human identity.'
@@ -89,6 +128,53 @@ jobs:
             echo "mode=normal" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Check for a live session's claim on this round
+        id: claim
+        if: steps.findings.outputs.skip != 'true' && steps.round.outputs.mode != 'hardstop'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          CLAIM_LABEL: ${{ inputs.claim_label }}
+          LEASE_MINUTES: ${{ inputs.claim_lease_minutes }}
+          SETTLE_SECONDS: ${{ inputs.claim_settle_seconds }}
+        run: |
+          set -eu
+
+          # Settle first. The live session is woken by the same review event
+          # that started this run, so checking immediately races its claim and
+          # reliably loses. This is the same ordering hazard that bit
+          # `awaiting-codex-reping`; the difference is that here we control both
+          # ends and can simply wait.
+          echo "Waiting ${SETTLE_SECONDS}s for a live session to claim the round..."
+          sleep "${SETTLE_SECONDS}"
+
+          # One fetch, both event kinds — same shape as the sweep's
+          # last_labeled_at / last_unlabeled_at helpers.
+          events=$(gh api --paginate --slurp \
+            "repos/${REPO}/issues/${PR_NUMBER}/events?per_page=100")
+          claimed_at=$(echo "${events}" | jq -r --arg l "${CLAIM_LABEL}" '
+            [.[][] | select(.event == "labeled"   and .label.name == $l) | .created_at] | max // ""')
+          released_at=$(echo "${events}" | jq -r --arg l "${CLAIM_LABEL}" '
+            [.[][] | select(.event == "unlabeled" and .label.name == $l) | .created_at] | max // ""')
+
+          cutoff=$(date -u -d "${LEASE_MINUTES} minutes ago" +%Y-%m-%dT%H:%M:%SZ)
+          held=false
+          if [ -z "${claimed_at}" ]; then
+            echo "No ${CLAIM_LABEL} claim on this PR — nobody is holding the round."
+          elif [ -n "${released_at}" ] && [[ "${released_at}" > "${claimed_at}" ]]; then
+            echo "Claim released at ${released_at} (after ${claimed_at}) — round is free."
+          elif [[ "${claimed_at}" < "${cutoff}" ]]; then
+            # Deliberately does NOT remove the label: this workflow only reads
+            # claims. Removing one it does not own could delete a claim written
+            # seconds later by a session it cannot see.
+            echo "Claim at ${claimed_at} is older than the ${LEASE_MINUTES}m lease (cutoff ${cutoff}) — treating as expired."
+          else
+            echo "Live session holds this round (claimed ${claimed_at}) — waking in report-only mode."
+            held=true
+          fi
+          echo "held=${held}" >> "$GITHUB_OUTPUT"
+
       - name: Hard-stop escalation
         if: steps.findings.outputs.skip != 'true' && steps.round.outputs.mode == 'hardstop'
         env:
@@ -110,7 +196,7 @@ jobs:
           The \`loop-stuck\` label has been added. To resume the autopilot remove that label and the next Codex review will wake Claude again, or close the loop manually."
 
       - name: Post @Claude wake-up comment
-        if: steps.findings.outputs.skip != 'true' && steps.round.outputs.mode != 'hardstop'
+        if: steps.findings.outputs.skip != 'true' && steps.round.outputs.mode != 'hardstop' && steps.claim.outputs.held != 'true'
         env:
           GH_TOKEN: ${{ secrets.CEREMONY_PAT }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -138,3 +224,33 @@ jobs:
           4. Before adding \`awaiting-codex-reping\`, bump the round counter: read the existing \`codex-round-N\` label, remove it, add \`codex-round-{N+1}\` (create the label on the fly if missing).
           5. Once fix commits land **and** ${REQUIRED_CHECKS_TEXT} are green, the CI-green wake-up posts the bare Codex review trigger for you (directly). Never write that trigger phrase into a comment yourself — a Codex mention anywhere in a comment body, even quoted inside prose, flips Codex into action mode and it writes code instead of reviewing. If CI fails, the CI-red wake-up will spawn a session to push another fix.
           6. Terminate when Codex submits a review with state \`APPROVED\`, posts \`APPROVED\` on its own line, or uses its fixed \"Codex Review: Didn't find any major issues\" approval template. Soft-warn at round 10, hard-stop at round 25 (workflow-enforced).${softwarn}"
+
+      - name: Post @Claude wake-up comment (round already claimed — report only)
+        if: steps.findings.outputs.skip != 'true' && steps.round.outputs.mode != 'hardstop' && steps.claim.outputs.held == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CEREMONY_PAT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_URL: ${{ github.event.review.html_url }}
+          REVIEW_STATE: ${{ github.event.review.state }}
+          REPO: ${{ github.repository }}
+          CLAIM_LABEL: ${{ inputs.claim_label }}
+        run: |
+          set -eu
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "@Claude — Codex submitted a review (state: \`${REVIEW_STATE}\`, see ${REVIEW_URL}).
+
+          **Another session already holds this round** (\`${CLAIM_LABEL}\` is set and within its lease). You are the second reader, and that is deliberate — independent triage of the same review has repeatedly caught defects the first reader and Codex both missed. Your job is to find those, not to land them.
+
+          **Read and report. Do not write.** Specifically:
+
+          - **Do not push.** The holder owns the branch. If you have a fix, put the patch in your report and let them apply it.
+          - **Do not touch labels.** Not the round counter, not the re-ping gate, not this claim. Bumping a round someone else is running makes the hard-stop threshold lie.
+          - **Do not reply on review threads.** A reply is the resolve signal in some repos, so a second one closes a thread its owner was still working.
+
+          What to produce instead — a single PR comment containing:
+
+          1. Each finding, confirmed against the code, with the file and line you verified it at.
+          2. **Anything you found that the review did not name.** This is the highest-value part of your run and the reason you were woken. Scope your search by the claim being made, not by the files the review happened to touch.
+          3. Where you disagree with a finding, and why.
+          4. If you believe the holder's approach is wrong rather than incomplete, say so plainly — a disagreement between two independent triages is worth more than either verdict alone.
+
+          If the claim turns out to be stale — no push, no comment and no label change from the holder for well past the lease — say so in your report and stop. Do not take over on your own judgement; a human or the holder resolves it."
