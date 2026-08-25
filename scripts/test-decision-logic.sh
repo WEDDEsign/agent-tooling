@@ -275,6 +275,23 @@ chk "resumed, then escalated again -> stay quiet" \
   "$(esc '[[{"created_at":"2026-08-24T06:00:00Z","body":"<!-- codex-autopilot:hard-stop -->"}],[{"created_at":"2026-08-24T11:00:00Z","body":"<!-- codex-autopilot:hard-stop -->"}]]' 2026-08-24T08:00:00Z)" "1"
 
 # ---------------------------------------------------------------------------
+section "The author-side set is built, not assumed"
+# `pr_author` is `// ""` when the account has been deleted — and so is the
+# login on a comment left by one. An empty `$me` would therefore match an empty
+# last-author and read that thread as ANSWERED, which silences the sweep on
+# exactly the PR whose author is gone. The assertions below the fold were
+# passing while that was true, because they hand the filter a set rather than
+# building one.
+SIDE_F=$(filter "$THREADS" '[$me, "claude[bot]"] + $extra | map(select(. != ""))')
+side() { jq -c -n --arg me "$1" --argjson extra "${2:-[]}" "$SIDE_F"; }
+
+chk "the author and the bot" "$(side WEDDEsign)" '["WEDDEsign","claude[bot]"]'
+chk "extras are appended" "$(side WEDDEsign '["org-bot"]')" '["WEDDEsign","claude[bot]","org-bot"]'
+chk "a deleted author drops out rather than matching every deleted commenter" \
+  "$(side "")" '["claude[bot]"]'
+chk "an empty extra is dropped too" "$(side WEDDEsign '[""]')" '["WEDDEsign","claude[bot]"]'
+
+# ---------------------------------------------------------------------------
 section "Unresolved threads — who spoke last decides whether to wake"
 # The discriminator between "nobody answered" and "a conversation is in
 # progress". `auto-resolve-review-threads` accepts the PR author, claude[bot]
@@ -317,8 +334,14 @@ chk "mixed: both count as unresolved" "$(unresolved "$MIXED")" "2"
 # A thread with no comments cannot happen via the UI, but a null author (a
 # deleted account) can. `// ""` must keep it counted rather than crashing the
 # filter — erring toward waking, since the alternative is a silent block.
-chk "null author reads as not-the-author -> wake" \
-  "$(unanswered "$(doc '{"id":"T1","isResolved":false,"comments":{"nodes":[{"id":"C1","author":null}]}}')")" "1"
+NULL_AUTHOR=$(doc '{"id":"T1","isResolved":false,"comments":{"nodes":[{"id":"C1","author":null}]}}')
+chk "null author reads as not-the-author -> wake" "$(unanswered "$NULL_AUTHOR")" "1"
+# The same thread on a PR whose own author is deleted. This is the case the
+# hand-written set above cannot reach: it only breaks once `$me` is built from
+# an empty `pr_author`, which is why the set construction is asserted on its
+# own further up.
+chk "a deleted author does not make a deleted commenter author-side" \
+  "$(unanswered "$NULL_AUTHOR" "$(side "")")" "1"
 # The `extra_identities` case: the caller template configures WEDDEsign on the
 # resolver, and on a PR opened by anyone else that login is author-side there.
 ORG=$(doc "$(th T1 false WEDDEsign C1)")
@@ -326,6 +349,23 @@ chk "configured extra identity spoke last -> report only" \
   "$(unanswered "$ORG" '["someone-else","claude[bot]","WEDDEsign"]')" "0"
 chk "the same login unconfigured -> wake" \
   "$(unanswered "$ORG" '["someone-else","claude[bot]"]')" "1"
+
+# ---------------------------------------------------------------------------
+section "Drafts are not swept"
+# A draft cannot merge at all, so an unanswered thread is not what is blocking
+# it and the wake would name the wrong cause. The ceremony docs reserve
+# `--draft` for code that should not be reviewed yet, which is the same call
+# made from the other side.
+DRAFT_F=$(filter "$THREADS" '.[] | select(.draft != true) | .number')
+prs() { printf '%s' "$1" | jq -r "$DRAFT_F" | paste -sd, -; }
+
+chk "ready PRs are swept" "$(prs '[{"number":1,"draft":false}]')" "1"
+chk "drafts are skipped" "$(prs '[{"number":1,"draft":true}]')" ""
+chk "mixed: only the ready one" \
+  "$(prs '[{"number":1,"draft":true},{"number":2,"draft":false}]')" "2"
+# The field is always present on this endpoint, but a missing one must sweep
+# rather than skip: erring toward looking is how a recovery net fails safe.
+chk "an absent draft field is not a draft" "$(prs '[{"number":1}]')" "1"
 
 # ---------------------------------------------------------------------------
 section "Unresolved-thread keys identify the thread AND its last comment"
@@ -425,6 +465,16 @@ chk "threads sweep paginates the review-thread connection" \
   "$(grep -c 'reviewThreads(first:100, after:$cursor)' "$THREADS")" "1"
 chk "threads sweep asks for the page cursor it pages on" \
   "$(grep -c 'pageInfo { hasNextPage endCursor }' "$THREADS")" "1"
+# A read failure has to reach the run's CONCLUSION, not just the summary: the
+# retry note is only true for a transient failure, and a permission or token
+# problem fails identically on every tick while the run stays green. Shell, not
+# jq, so this is the only thing that can hold it.
+chk "threads sweep counts a failed thread read" \
+  "$(grep -c 'read_fail=$((read_fail + 1))' "$THREADS")" "1"
+chk "threads sweep exits nonzero on a failed thread read" \
+  "$(grep -c 'had_fatal}" -ne 0 ] || \[ "${read_fail}" -ne 0 \]' "$THREADS")" "1"
+chk "threads sweep does not claim a clean sweep after a failed read" \
+  "$(grep -c 'woke}" = "0" \] && \[ "${had_fatal}" = "0" \] && \[ "${read_fail}" = "0" \]' "$THREADS")" "1"
 chk "sweep claims the gate by DELETE before posting" \
   "$(grep -c 'X DELETE .*labels/\${LABEL}' "$SWEEP")" "2"
 chk "ci-green claims the gate before posting" \

@@ -157,12 +157,19 @@ jobs:
               }
             }'
 
-          # Every open PR, not a label-filtered subset — see the header on why
-          # this population differs from the re-ping sweep's. --paginate so a
-          # repo with more than 100 open PRs does not leave the tail unswept
-          # forever, which is the one failure a recovery net must not have.
+          # Every open non-draft PR, not a label-filtered subset — see the
+          # header on why this population differs from the re-ping sweep's.
+          # --paginate so a repo with more than 100 open PRs does not leave the
+          # tail unswept forever, which is the one failure a recovery net must
+          # not have.
+          #
+          # Drafts are excluded because a draft cannot merge at all: an
+          # unanswered thread is not what is blocking it, so the wake would be
+          # about something that isn't the problem. The ceremony docs reserve
+          # `--draft` for code that should not be reviewed yet, which is the
+          # same judgement from the other side.
           prs=$(gh api --paginate "repos/${REPO}/pulls?state=open&per_page=100" \
-            --jq '.[] | .number')
+            --jq '.[] | select(.draft != true) | .number')
 
           if [ -z "${prs}" ]; then
             note "No open PRs. Nothing to sweep."
@@ -171,6 +178,7 @@ jobs:
 
           woke=0
           had_fatal=0
+          read_fail=0
 
           note "| PR | Outcome |"
           note "| --- | --- |"
@@ -241,6 +249,7 @@ jobs:
             done
 
             if [ "${read_ok}" = "0" ]; then
+              read_fail=$((read_fail + 1))
               note "| #${pr} | ⚠️ could not read review threads — skipped, will retry next sweep |"
               continue
             fi
@@ -253,8 +262,15 @@ jobs:
             # thread they spoke on last is one where the answer exists and the
             # resolve is what failed. Diverging from that list here would wake
             # a session onto a thread the resolver considers answered.
+            # `map(select(. != ""))` is not tidying. `pr_author` is `// ""`
+            # for a deleted account, and so is the login of a comment left by
+            # one — so an empty `$me` would match an empty last-author and
+            # classify that thread as ANSWERED, silencing the sweep on exactly
+            # the PR whose author is gone. The assertion that a null author
+            # still wakes someone was passing only because it never built the
+            # set this way.
             side=$(jq -c -n --arg me "${pr_author}" --argjson extra "${extra_side}" \
-              '[$me, "claude[bot]"] + $extra')
+              '[$me, "claude[bot]"] + $extra | map(select(. != ""))')
 
             # One `threadId lastCommentId` line per unanswered thread. Both
             # halves matter: the thread id is what makes a NEW thread visible,
@@ -337,7 +353,7 @@ jobs:
             echo "Woke ${WAKE_HANDLE} on #${pr} for ${unanswered} unanswered threads."
           done
 
-          if [ "${woke}" = "0" ] && [ "${had_fatal}" = "0" ]; then
+          if [ "${woke}" = "0" ] && [ "${had_fatal}" = "0" ] && [ "${read_fail}" = "0" ]; then
             note ""
             note "No green PR is blocked on an unanswered thread."
           fi
@@ -345,5 +361,21 @@ jobs:
           if [ "${had_fatal}" -ne 0 ]; then
             note ""
             note "> 🚨 ${ESCALATION_HANDLE} — at least one blocked PR could not be reported. See the errors above."
+          fi
+
+          # A failed read is not the same as a clean sweep, and the difference
+          # has to reach the run's conclusion. "Will retry next sweep" is only
+          # true for a transient failure; a permission, token or schema problem
+          # fails identically on every tick, and a green run saying "No green
+          # PR is blocked" would be this workflow reporting success while it
+          # examines nothing — the exact failure mode it exists to catch, in
+          # itself. One red run is the cost of a transient hiccup.
+          if [ "${read_fail}" -ne 0 ]; then
+            note ""
+            note "> 🚨 ${ESCALATION_HANDLE} — review threads could not be read for ${read_fail} PR(s). One tick can be transient; every tick means the sweep is blind."
+            echo "::error::Review-thread read failed for ${read_fail} PR(s); this sweep examined fewer PRs than it enumerated."
+          fi
+
+          if [ "${had_fatal}" -ne 0 ] || [ "${read_fail}" -ne 0 ]; then
             exit 1
           fi
