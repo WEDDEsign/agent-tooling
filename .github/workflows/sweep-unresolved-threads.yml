@@ -34,12 +34,23 @@ name: Sweep green PRs with unresolved review threads (reusable)
 # PRs this exists for.
 #
 # WHAT MAKES IT SAFE TO RE-RUN
-# The marker comment carries the HEAD SHA it was posted for, and a head that
-# already has one is skipped. Identity, not time — the sibling sweep's header
-# records two timestamp anchors that were tried for "which head does this
-# belong to" and were both wrong in the same direction, and this avoids the
-# question entirely. Push a new commit and the PR becomes eligible again, which
-# is correct: the threads are still open against code that has moved.
+# The marker comment records WHICH unanswered threads were reported, as one
+# short digest per thread over `(thread id, its last comment id)`. A sweep
+# stands down only when every thread it would report now is already covered by
+# a marker on this head. So:
+#   - nothing changed            -> silent, however often it runs;
+#   - a reviewer opens a new thread, or comments again on an answered one
+#                                -> a digest nobody has reported -> wakes;
+#   - some threads get answered  -> the rest are a SUBSET of what was already
+#                                   reported -> silent, so replying one thread
+#                                   at a time cannot pull the sweep into a
+#                                   wake-storm.
+# Keying on the head SHA alone did the first and last of those and got the
+# middle one wrong: a thread opened after the report inherited the marker of
+# the head it was opened on and was suppressed forever, which is exactly the
+# blocked-with-no-wake state this exists to recover. The head still scopes the
+# marker, so a push makes the PR eligible again — right, because the threads
+# are now open against code that has moved.
 #
 # WHAT IT WAKES ON, AND WHAT IT ONLY REPORTS
 # Woken:
@@ -63,6 +74,10 @@ on:
         description: 'JSON array of required check-run names that must all be success before a PR counts as green. Use the SAME value as the wake-on-ci-green caller.'
         type: string
         required: true
+      extra_identities:
+        description: 'Comma-separated extra logins that count as AUTHOR-SIDE, beyond the PR author and claude[bot]. Pass the SAME value as the auto-resolve-review-threads caller: that workflow treats a reply from these logins as a resolve signal, so a thread one of them answered last is answered here too.'
+        type: string
+        default: ''
       wake_handle:
         description: 'Who to wake for the recoverable case. The Claude GitHub App no-ops on mentions authored by github-actions[bot], which is why the post below uses CEREMONY_PAT.'
         type: string
@@ -101,6 +116,7 @@ jobs:
           CEREMONY_PAT: ${{ secrets.CEREMONY_PAT }}
           REPO: ${{ github.repository }}
           REQUIRED_CHECKS: ${{ inputs.required_checks }}
+          EXTRA_IDENTITIES: ${{ inputs.extra_identities }}
           WAKE_HANDLE: ${{ inputs.wake_handle }}
           ESCALATION_HANDLE: ${{ inputs.escalation_handle }}
         run: |
@@ -112,6 +128,34 @@ jobs:
 
           note "## Unresolved-thread sweep"
           note ""
+
+          # The author-side set, minus the PR author, who is only known per PR.
+          # Trailing/leading spaces trimmed so `"WEDDEsign, someone"` works the
+          # way a caller would expect it to.
+          extra_side=$(printf '%s\n' "${EXTRA_IDENTITIES}" | jq -R -c '
+            split(",") | map(sub("^ +";"") | sub(" +$";"")) | map(select(length > 0))')
+
+          # 100 threads per page, and a page beyond the last real one costs one
+          # request that returns nothing — so the cap is what bounds a runaway,
+          # not what bounds a real PR.
+          threads_query='
+            query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
+              repository(owner:$owner, name:$name) {
+                pullRequest(number:$pr) {
+                  author { login }
+                  reviewThreads(first:100, after:$cursor) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes {
+                      id
+                      isResolved
+                      isOutdated
+                      path
+                      comments(last:1) { nodes { id author { login } } }
+                    }
+                  }
+                }
+              }
+            }'
 
           # Every open PR, not a label-filtered subset — see the header on why
           # this population differs from the re-ping sweep's. --paginate so a
@@ -136,65 +180,97 @@ jobs:
 
             # Green first, and cheaply: a PR blocked on CI is not blocked on
             # threads, and skipping it here avoids a GraphQL round-trip per PR
-            # per sweep. Same jq shape as the re-ping sweep — bind $req so the
-            # inner .name is not shadowed by jq's rebinding of `.`.
+            # per sweep.
+            #
+            # `filter=latest` is the API default, but a re-run adds a SECOND
+            # check run under the same name and "is this check green NOW"
+            # must not be answerable by a stale success — so the reliance is
+            # pinned in the URL and the jq picks the newest per name anyway.
+            # Either half alone would do; neither is expensive, and the failure
+            # they prevent is posting "green but unmergeable" onto a red PR.
             # --paginate --slurp because a long-lived PR accumulates check runs
             # across re-runs, and past 100 a required check on a later page is
             # simply absent, which would read as "not green" forever.
-            runs=$(gh api --paginate --slurp "repos/${REPO}/commits/${head_sha}/check-runs?per_page=100" \
-              | jq -c '[.[].check_runs[] | {name, conclusion}]')
+            runs=$(gh api --paginate --slurp "repos/${REPO}/commits/${head_sha}/check-runs?per_page=100&filter=latest" \
+              | jq -c '[.[].check_runs[] | {name, conclusion, started_at, id}]')
             missing=$(printf '%s' "${REQUIRED_CHECKS}" | jq -r --argjson have "${runs}" '
               .[] as $req
-              | select(($have | any(.name == $req and .conclusion == "success")) | not)
+              | select((($have | map(select(.name == $req)) | sort_by(.started_at, .id)
+                         | last | .conclusion) == "success") | not)
               | $req')
 
             [ -n "${missing}" ] && continue
 
             # `isResolved` is not in REST; the review-thread connection is
-            # GraphQL-only. Each thread carries its comments in order, so the
-            # LAST author is the discriminator between "nobody answered" and
-            # "a conversation is in progress" — see the header.
-            threads=$(gh api graphql \
-              -f owner="${owner}" -f name="${name}" -F pr="${pr}" \
-              -f query='
-                query($owner:String!, $name:String!, $pr:Int!) {
-                  repository(owner:$owner, name:$name) {
-                    pullRequest(number:$pr) {
-                      author { login }
-                      reviewThreads(first:100) {
-                        nodes {
-                          isResolved
-                          isOutdated
-                          path
-                          comments(last:1) { nodes { author { login } } }
-                        }
-                      }
-                    }
-                  }
-                }' 2>/dev/null || echo "")
+            # GraphQL-only. Paginated: a PR past 100 threads would otherwise
+            # have its tail read as "no unresolved threads", which is the same
+            # silent under-report the PR listing above paginates to avoid.
+            # Each thread carries its comments in order, so the LAST author is
+            # the discriminator between "nobody answered" and "a conversation
+            # is in progress" — see the header.
+            threads='[]'
+            pr_author=""
+            cursor=""
+            pages=0
+            read_ok=1
+            truncated=0
 
-            if [ -z "${threads}" ]; then
+            while :; do
+              if [ -z "${cursor}" ]; then
+                page=$(gh api graphql -f owner="${owner}" -f name="${name}" -F pr="${pr}" \
+                  -f query="${threads_query}" 2>/dev/null || echo "")
+              else
+                page=$(gh api graphql -f owner="${owner}" -f name="${name}" -F pr="${pr}" \
+                  -f cursor="${cursor}" -f query="${threads_query}" 2>/dev/null || echo "")
+              fi
+
+              if [ -z "${page}" ]; then read_ok=0; break; fi
+
+              pr_author=$(printf '%s' "${page}" | jq -r '.data.repository.pullRequest.author.login // ""')
+              threads=$(printf '%s' "${threads}" | jq -c \
+                --argjson add "$(printf '%s' "${page}" | jq -c '.data.repository.pullRequest.reviewThreads.nodes // []')" \
+                '. + $add')
+
+              [ "$(printf '%s' "${page}" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage')" = "true" ] || break
+
+              cursor=$(printf '%s' "${page}" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor // ""')
+              [ -n "${cursor}" ] || break
+
+              pages=$((pages + 1))
+              if [ "${pages}" -ge 20 ]; then truncated=1; break; fi
+            done
+
+            if [ "${read_ok}" = "0" ]; then
               note "| #${pr} | ⚠️ could not read review threads — skipped, will retry next sweep |"
               continue
             fi
 
-            pr_author=$(printf '%s' "${threads}" | jq -r '.data.repository.pullRequest.author.login // ""')
+            [ "${truncated}" = "1" ] && note "| #${pr} | ⚠️ more than 2000 review threads — evaluated the first 2000 |"
 
-            # Unresolved threads whose last comment is NOT from the author
-            # side. `claude[bot]` and the PR author are both author-side: those
-            # are the identities `auto-resolve-review-threads` accepts as a
-            # resolve signal, so a thread they spoke on last is one where the
-            # answer exists and the resolve is what failed.
-            unanswered=$(printf '%s' "${threads}" | jq -r --arg me "${pr_author}" '
-              [.data.repository.pullRequest.reviewThreads.nodes[]
-               | select(.isResolved == false)
-               | select((.comments.nodes[-1].author.login // "") as $last
-                        | $last != $me and $last != "claude[bot]")]
-              | length')
+            # `claude[bot]`, the PR author and any configured `extra_identities`
+            # are all author-side: those are exactly the identities
+            # `auto-resolve-review-threads` accepts as a resolve signal, so a
+            # thread they spoke on last is one where the answer exists and the
+            # resolve is what failed. Diverging from that list here would wake
+            # a session onto a thread the resolver considers answered.
+            side=$(jq -c -n --arg me "${pr_author}" --argjson extra "${extra_side}" \
+              '[$me, "claude[bot]"] + $extra')
+
+            # One `threadId lastCommentId` line per unanswered thread. Both
+            # halves matter: the thread id is what makes a NEW thread visible,
+            # the comment id is what makes a new comment on an OLD thread
+            # visible. See "what makes it safe to re-run".
+            keys=$(printf '%s' "${threads}" | jq -r --argjson side "${side}" '
+              .[]
+              | select(.isResolved == false)
+              | select((.comments.nodes[-1].author.login // "") as $last
+                       | ($side | index($last)) | not)
+              | "\(.id) \(.comments.nodes[-1].id // "-")"')
+
+            unanswered=$(printf '%s' "${keys}" | grep -c . || true)
 
             unresolved=$(printf '%s' "${threads}" | jq -r '
-              [.data.repository.pullRequest.reviewThreads.nodes[]
-               | select(.isResolved == false)] | length')
+              [.[] | select(.isResolved == false)] | length')
 
             [ "${unresolved}" = "0" ] && continue
 
@@ -203,15 +279,29 @@ jobs:
               continue
             fi
 
-            # Idempotency, keyed on the HEAD rather than on a timestamp. A
-            # marker for this exact SHA means this head was already reported;
-            # a push makes the PR eligible again, which is right, because the
-            # threads are now open against code that has moved.
-            marker="<!-- codex-autopilot:unresolved-threads ${head_sha} -->"
-            seen=$(gh api --paginate --slurp "repos/${REPO}/issues/${pr}/comments?per_page=100" \
-              | jq -r --arg m "${marker}" '[.[][] | select(.body | contains($m))] | length')
+            # Short digests rather than the raw node ids: the ids are long,
+            # opaque and would dominate the comment, and 32 bits is ample for
+            # "have I already reported this exact thread state".
+            tokens=$(printf '%s\n' "${keys}" | grep . \
+              | while read -r k; do printf '%s' "${k}" | sha256sum | cut -c1-8; done \
+              | sort -u | paste -sd, -)
 
-            if [ "${seen}" != "0" ]; then
+            # Every digest already covered by a marker on THIS head means every
+            # thread this sweep would report has been reported. A subset of a
+            # previous report is therefore silent, and one unseen digest is
+            # enough to wake.
+            prefix="codex-autopilot:unresolved-threads ${head_sha} keys="
+            seen_keys=$(gh api --paginate --slurp "repos/${REPO}/issues/${pr}/comments?per_page=100" \
+              | jq -r --arg p "${prefix}" '
+                [.[][] | .body | select(contains($p)) | capture($p + "(?<k>[0-9a-f,]+)").k]
+                | join(",")')
+
+            fresh=$(jq -r -n --arg tokens "${tokens}" --arg seen "${seen_keys}" '
+              ($seen | split(",")) as $have
+              | [($tokens | split(","))[] | . as $t | select($have | index($t) | not)]
+              | length')
+
+            if [ "${fresh}" = "0" ]; then
               note "| #${pr} | ⏸️ ${unanswered} unanswered — already reported for \`${head_sha:0:10}\` |"
               continue
             fi
@@ -235,7 +325,7 @@ jobs:
 
           Head \`${head_sha:0:10}\`. If you push a fix, this sweep will look again at the new head.
 
-          ${marker}"; then
+          <!-- ${prefix}${tokens} -->"; then
               had_fatal=1
               note "| #${pr} | 🚨 ${unanswered} unanswered but the wake could not be posted |"
               echo "::error::#${pr} is green with ${unanswered} unanswered threads and the wake-up comment failed."
