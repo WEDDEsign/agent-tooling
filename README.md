@@ -52,6 +52,7 @@ agent-tooling/
 │   ├── wake-on-ci-red.yml
 │   ├── sweep-stalled-repings.yml        # cron recovery net under wake-on-ci-green
 │   ├── auto-resolve-review-threads.yml
+│   ├── sweep-unresolved-threads.yml     # cron recovery net under auto-resolve-review-threads
 │   └── cleanup-stale-codex-labels.yml
 ├── templates/caller-workflows/          # thin per-repo callers that invoke the reusable workflows
 ├── labels/                              # canonical label taxonomy + gh sync script
@@ -81,6 +82,23 @@ in [`docs/per-repo-wiring.md`](docs/per-repo-wiring.md).
 - **Precedence hygiene:** shared skills are namespaced `ceremony:<skill>`; never
   create a same-named skill in a repo's local `.claude/`.
 - **Ownership:** one owner for versioning/releases of this repo.
+- **New-tier rule (added after #8):** a new *recovery* workflow needs an
+  incident that got past **two** existing ones. The plane is now six workflows
+  and ~1,700 lines, and its shape is nets under nets — Codex reviews →
+  `wake-on-ci-green` re-pings → `sweep-stalled-repings` catches missed re-pings
+  → `auto-resolve-review-threads` closes threads → `sweep-unresolved-threads`
+  catches missed replies. Every layer was justified by a real incident, which
+  is exactly how such a system grows without bound: each net has a hole, and
+  each hole eventually produces one. Prefer removing the gap over covering it —
+  #1226 existed only because the ruleset requires conversation resolution *and*
+  the resolve signal is a reply rather than a push, and dropping either would
+  have deleted the failure mode instead of netting it.
+- **Unattended-automation tax:** a scheduled job that comments on other
+  people's PRs takes roughly three review rounds before it is right, and the
+  findings are all the same species — posting the wrong cause, posting on stale
+  state, going silent, exiting green while blind, trusting an unauthenticated
+  marker. #8 took 13 findings across four rounds with none of them wrong.
+  Budget for that, or do not build the job.
 
 ## Dogfood before publish
 

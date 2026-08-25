@@ -98,6 +98,35 @@ summary, because they still need a person: a merge conflict (CI cannot run at
 all, so there is nothing green to re-ping against) and required checks that were
 cancelled or timed out (`wake-on-ci-red` fires on `failure` only).
 
+### The unresolved-thread sweep (only where the ruleset requires resolution)
+
+`auto-resolve-review-threads` closes a thread when the author side **replies**
+on it. The reply is the resolve signal — nothing carries "commit pushed"
+through to "thread closed". Where the repo's ruleset requires conversation
+resolution, that makes a forgotten reply a merge block on a PR whose checks are
+all green, and GitHub names no reason for it: *"Cannot merge at this time"*,
+with less than that on mobile. NordScope#1226 sat there for nine hours on nine
+unreplied threads, every finding already fixed in code.
+
+`sweep-unresolved-threads` is the level-triggered net under it, on the same
+argument as the re-ping sweep: a session that forgets to reply has by
+construction not read the doc telling it to, and nothing on the PR page prompts
+it to look. It wakes only where a session can act — an unresolved thread whose
+*last* comment is the reviewer's. A thread the author side answered last is
+reported in the run summary and nothing more, because that is either a failed
+resolve or a live argument, and waking someone into an argument is noise.
+
+It does **not** replace `sweep-stalled-repings` and does not share its
+enumeration: that sweep looks at PRs carrying the gate label, because a missed
+re-ping is by definition gated, whereas this condition has no label at all.
+Give it the same `required_checks` as `wake-on-ci-green` and the same
+`extra_identities` as `auto-resolve-review-threads` — the second matters
+because the resolver treats those logins as author-side, and a sweep that
+disagreed would wake a session onto a thread the resolver considers answered.
+
+Skip it entirely in a repo whose ruleset does not require conversation
+resolution: there an open thread blocks nothing, and every wake would be noise.
+
 ### Reusable-workflow notes
 
 - **Each caller needs its own `permissions:` block.** A called (reusable)
@@ -115,7 +144,7 @@ cancelled or timed out (`wake-on-ci-red` fires on `failure` only).
 
 | Repo | Labels | Plugin | Workflows | Notes |
 |---|---|---|---|---|
-| **NordScope** | sync (reconciles its ad-hoc scheme) | adopt plugin | **already runs these as standalone YAML** — migrate to the reusable callers to de-duplicate, no behavior change | The source of truth. Its `NordscopePAT` → map to `CEREMONY_PAT`. Required checks: `typecheck-and-build`, `pytest`, `banned-strings`; CI workflows: `frontend-ci`, `backend-tests`, `migration-guardrails`. |
+| **NordScope** | sync (reconciles its ad-hoc scheme) | adopt plugin | **already runs these as standalone YAML** — migrate to the reusable callers to de-duplicate, no behavior change | The source of truth. Reads `secrets.CEREMONY_PAT` directly — no mapping needed, and no secret named `NordscopePAT` exists there. Required checks: `typecheck-and-build`, `pytest`, `banned-strings`; CI workflows: `frontend-ci`, `backend-tests`, `migration-guardrails`. |
 | **Mentra** | sync (has the taxonomy; fixes colors) | **pilot** | gains the full autopilot it lacks today (has only `issue-link`) | Required checks: `Backend (pytest)`, `Backend integration (Firestore emulator)`, `Frontend (tsc + build)`; CI workflows: `CI`, `E2E`. Keep its 21 eval workflows + `issue-link` as-is (domain). |
 | **VectraIQ** | sync (**had only a bare `codex`**) | adopt plugin | gains autopilot from zero | **Biggest gap: its `CLAUDE.md` has 0 Codex mentions.** Before wiring, add the Codex collaboration model to its `CLAUDE.md` (copy Mentra's section). Confirm CI workflow + check names (`backend-ci`, `frontend-ci`). |
 | **intelligence-core** | sync (has taxonomy w/ different colors) | adopt plugin | gains autopilot from zero | Shared-contracts repo. Required check: from `test.yml`. Its domain tooling (schema-evolution skills) stays local. |
