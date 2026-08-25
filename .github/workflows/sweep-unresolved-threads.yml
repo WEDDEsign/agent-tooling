@@ -129,6 +129,26 @@ jobs:
           note "## Unresolved-thread sweep"
           note ""
 
+          # The marker is a SUPPRESSION signal, so it has to be authenticated.
+          # Anyone who can comment on a PR can read the format out of this file
+          # and the thread and comment ids out of the API, so an unauthenticated
+          # match lets a commenter post markers covering the live keys and hold
+          # `fresh` at zero for as long as they care to — silencing the recovery
+          # net on the PR it is meant to recover, with no error anywhere. Only
+          # comments from the identity this sweep posts under count.
+          #
+          # Resolved once per run, and a failure refuses the whole sweep rather
+          # than falling back to trusting every comment: if this token cannot be
+          # read it cannot post either, so there is no wake to be had, and
+          # failing open would be choosing the unsafe half of a run that is
+          # already broken.
+          marker_author=$(GH_TOKEN="${CEREMONY_PAT}" gh api user --jq '.login' 2>/dev/null || echo "")
+          if [ -z "${marker_author}" ]; then
+            note "> 🚨 ${ESCALATION_HANDLE} — the CEREMONY_PAT identity could not be read, so suppression markers cannot be authenticated. Nothing was swept."
+            echo "::error::CEREMONY_PAT identity unreadable; refusing to sweep rather than trusting unauthenticated markers."
+            exit 1
+          fi
+
           # The author-side set, minus the PR author, who is only known per PR.
           # Trailing/leading spaces trimmed so `"WEDDEsign, someone"` works the
           # way a caller would expect it to.
@@ -337,8 +357,9 @@ jobs:
             # enough to wake.
             prefix="codex-autopilot:unresolved-threads ${head_sha} keys="
             seen_keys=$(gh api --paginate --slurp "repos/${REPO}/issues/${pr}/comments?per_page=100" \
-              | jq -r --arg p "${prefix}" '
-                [.[][] | .body | select(contains($p)) | capture($p + "(?<k>[0-9a-f,]+)").k]
+              | jq -r --arg p "${prefix}" --arg author "${marker_author}" '
+                [.[][] | select(.user.login == $author) | .body | select(contains($p))
+                 | capture($p + "(?<k>[0-9a-f,]+)").k]
                 | join(",")')
 
             fresh=$(jq -r -n --arg tokens "${tokens}" --arg seen "${seen_keys}" '
@@ -355,24 +376,38 @@ jobs:
             # would name a SHA whose threads were never examined, and would
             # write a marker suppressing the next sweep's look at the real
             # head. Re-read and stand down; nothing has been consumed.
-            head_now=$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha' || echo "")
+            # Mergeability is re-read WITH the head, because the base can
+            # advance without the head moving: the PR turns `dirty` while its
+            # historical check runs stay green, so a head-only comparison
+            # passes and the post names the threads as the blocker on a PR
+            # whose CI can no longer run. The guard before the green path
+            # cannot cover this — it ran before the thread reads, and the race
+            # is everything after it. Same shape as the sibling sweep's
+            # pre-claim re-read.
+            after=$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha + " " + .mergeable_state' || echo "")
+            head_now="${after%% *}"; state_now="${after##* }"
 
-            # An unreadable head is NOT permission to post. `|| echo ""` exists
-            # so a failure here doesn't abort the sweep under `set -e`, and
+            # An unreadable PR is NOT permission to post. `|| echo ""` exists so
+            # a failure here doesn't abort the sweep under `set -e`, and
             # treating the empty result as "unchanged" would have turned it
             # into the opposite: post anyway, naming a SHA and a green-check
             # snapshot that were never re-confirmed, while the real head may be
             # running or failing CI. Same outcome as a moved head — stand down,
             # nothing consumed — and counted, because a read that always fails
             # means a sweep that never posts.
-            if [ -z "${head_now}" ]; then
+            if [ -z "${after}" ]; then
               read_fail=$((read_fail + 1))
-              note "| #${pr} | ↩️ could not re-read the head before posting — next sweep re-evaluates |"
+              note "| #${pr} | ↩️ could not re-read the PR before posting — next sweep re-evaluates |"
               continue
             fi
 
             if [ "${head_now}" != "${head_sha}" ]; then
               note "| #${pr} | ↩️ head moved to \`${head_now:0:10}\` mid-sweep — next sweep re-evaluates |"
+              continue
+            fi
+
+            if [ "${state_now}" = "dirty" ] || [ "${state_now}" = "unknown" ]; then
+              note "| #${pr} | ↩️ mergeability became \`${state_now}\` mid-sweep — next sweep re-evaluates |"
               continue
             fi
 

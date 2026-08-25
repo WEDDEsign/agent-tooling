@@ -385,27 +385,44 @@ chk "a missing comment id still yields a key" \
 
 # ---------------------------------------------------------------------------
 section "The sweep stands down only when every key was already reported"
-SEEN_F=$(filter "$THREADS" '[.[][] | .body | select(contains($p)) | capture($p + "(?<k>[0-9a-f,]+)").k]
+# The marker is a SUPPRESSION signal: matching text from an arbitrary
+# commenter would let anyone hold `fresh` at zero and silence the net on the PR
+# it exists to recover. Only the identity the sweep posts under counts.
+SEEN_F=$(filter "$THREADS" '[.[][] | select(.user.login == $author) | .body | select(contains($p))
+                 | capture($p + "(?<k>[0-9a-f,]+)").k]
                 | join(",")')
 FRESH_F=$(filter "$THREADS" '($seen | split(",")) as $have
               | [($tokens | split(","))[] | . as $t | select($have | index($t) | not)]
               | length')
-seen() { printf '%s' "$1" | jq -r --arg p "$2" "$SEEN_F"; }
+SWEEPER=ceremony-bot
+seen() { printf '%s' "$1" | jq -r --arg p "$2" --arg author "${3:-$SWEEPER}" "$SEEN_F"; }
+cmt() { printf '{"user":{"login":"%s"},"body":"%s"}' "$1" "$2"; }
 fresh() { jq -r -n --arg tokens "$1" --arg seen "$2" "$FRESH_F"; }
 
 P_OLD='codex-autopilot:unresolved-threads aaaaaaaaaa keys='
 P_NEW='codex-autopilot:unresolved-threads bbbbbbbbbb keys='
-HIST="[[{\"body\":\"woken <!-- ${P_OLD}11111111,22222222 -->\"}]]"
+HIST="[[$(cmt "$SWEEPER" "woken <!-- ${P_OLD}11111111,22222222 -->")]]"
 
 chk "keys are read back off this head's marker" "$(seen "$HIST" "$P_OLD")" "11111111,22222222"
 chk "a new head has no marker of its own" "$(seen "$HIST" "$P_NEW")" ""
 chk "no history -> nothing reported" "$(seen '[[]]' "$P_OLD")" ""
 chk "two markers on one head union their keys" \
-  "$(seen "[[{\"body\":\"<!-- ${P_OLD}11111111 -->\"},{\"body\":\"<!-- ${P_OLD}33333333 -->\"}]]" "$P_OLD")" \
+  "$(seen "[[$(cmt "$SWEEPER" "<!-- ${P_OLD}11111111 -->"),$(cmt "$SWEEPER" "<!-- ${P_OLD}33333333 -->")]]" "$P_OLD")" \
   "11111111,33333333"
 # A body mentioning the prefix without a key list must not blow up the read.
 chk "a prefix with no keys contributes nothing" \
-  "$(seen "[[{\"body\":\"see ${P_OLD}\"}]]" "$P_OLD")" ""
+  "$(seen "[[$(cmt "$SWEEPER" "see ${P_OLD}")]]" "$P_OLD")" ""
+# Anyone can comment on a PR, and both halves of the marker are discoverable:
+# the format is in this file, the ids are in the API. An unauthenticated match
+# would let a commenter suppress the sweep indefinitely, with no error anywhere
+# — the net silenced on exactly the PR it exists for.
+chk "a marker from anyone else is ignored" \
+  "$(seen "[[$(cmt drive-by "<!-- ${P_OLD}11111111,22222222 -->")]]" "$P_OLD")" ""
+chk "a forged marker cannot mask a real one" \
+  "$(seen "[[$(cmt drive-by "<!-- ${P_OLD}99999999 -->"),$(cmt "$SWEEPER" "<!-- ${P_OLD}11111111 -->")]]" "$P_OLD")" \
+  "11111111"
+chk "the sweeper identity is compared exactly" \
+  "$(seen "$HIST" "$P_OLD" "${SWEEPER}-staging")" ""
 
 chk "unchanged state -> stand down" "$(fresh "11111111,22222222" "11111111,22222222")" "0"
 chk "a subset (some threads answered) -> stand down, no wake-storm" \
@@ -471,10 +488,18 @@ chk "threads sweep asks for the page cursor it pages on" \
 # jq, so this is the only thing that can hold it.
 chk "threads sweep counts a failed read — thread read AND head re-check" \
   "$(grep -c 'read_fail=$((read_fail + 1))' "$THREADS")" "2"
-chk "threads sweep stands down on an unreadable head rather than posting" \
-  "$(grep -c 'if \[ -z "${head_now}" \]; then' "$THREADS")" "1"
+chk "threads sweep stands down on an unreadable PR rather than posting" \
+  "$(grep -c 'if \[ -z "${after}" \]; then' "$THREADS")" "1"
 chk "threads sweep defers a dirty or unknown mergeable_state" \
   "$(grep -cE '^ +(dirty|unknown)\)$' "$THREADS")" "2"
+# The base can advance without the head moving, so the pre-post check must
+# re-read BOTH — a head-only comparison passes while the PR is conflicted.
+chk "threads sweep re-reads mergeability with the head before posting" \
+  "$(grep -c "jq '.head.sha + \" \" + .mergeable_state'" "$THREADS")" "1"
+chk "threads sweep defers when mergeability changed under it" \
+  "$(grep -c 'state_now}" = "dirty" \] || \[ "${state_now}" = "unknown" \]' "$THREADS")" "1"
+chk "threads sweep refuses to run if it cannot authenticate its own markers" \
+  "$(grep -c 'if \[ -z "${marker_author}" \]; then' "$THREADS")" "1"
 chk "threads sweep exits nonzero on a failed thread read" \
   "$(grep -c 'had_fatal}" -ne 0 ] || \[ "${read_fail}" -ne 0 \]' "$THREADS")" "1"
 chk "threads sweep does not claim a clean sweep after a failed read" \
