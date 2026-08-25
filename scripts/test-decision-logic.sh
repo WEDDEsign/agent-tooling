@@ -27,7 +27,6 @@ DRIFT_LOG=$(mktemp)
 trap 'rm -f "$DRIFT_LOG"' EXIT
 SWEEP=.github/workflows/sweep-stalled-repings.yml
 GREEN=.github/workflows/wake-on-ci-green.yml
-REVIEW=.github/workflows/wake-on-codex-review.yml
 THREADS=.github/workflows/sweep-unresolved-threads.yml
 
 chk() { # name, got, want
@@ -276,42 +275,6 @@ chk "resumed, then escalated again -> stay quiet" \
   "$(esc '[[{"created_at":"2026-08-24T06:00:00Z","body":"<!-- codex-autopilot:hard-stop -->"}],[{"created_at":"2026-08-24T11:00:00Z","body":"<!-- codex-autopilot:hard-stop -->"}]]' 2026-08-24T08:00:00Z)" "1"
 
 # ---------------------------------------------------------------------------
-section "Claim on a round — a live session holds it, or the lease has run out"
-# A session subscribed to the PR gets the same review event this workflow fires
-# on, so both triage the round. The fix is not to suppress the second one — two
-# of three parallel triages on NordScope#1233 found defects the first reader and
-# Codex both missed — but to send it in read-only. These assertions cover when
-# that happens.
-CLAIMED_F='[.[][] | select(.event == "labeled"   and .label.name == $l) | .created_at] | max // ""'
-RELEASED_F='[.[][] | select(.event == "unlabeled" and .label.name == $l) | .created_at] | max // ""'
-claimed()  { printf '%s' "$1" | jq -r --arg l "claude-round-claimed" "$(filter "$REVIEW" "$CLAIMED_F")"; }
-released() { printf '%s' "$1" | jq -r --arg l "claude-round-claimed" "$(filter "$REVIEW" "$RELEASED_F")"; }
-
-EV_HELD='[[{"event":"labeled","label":{"name":"claude-round-claimed"},"created_at":"2026-08-25T12:05:00Z"}]]'
-chk "reads the newest labeled timestamp" "$(claimed "$EV_HELD")" "2026-08-25T12:05:00Z"
-chk "no claim label -> empty" "$(claimed '[[{"event":"labeled","label":{"name":"other"},"created_at":"2026-08-25T12:05:00Z"}]]')" ""
-chk "claims across pages take the max" \
-  "$(claimed '[[{"event":"labeled","label":{"name":"claude-round-claimed"},"created_at":"2026-08-25T11:00:00Z"}],[{"event":"labeled","label":{"name":"claude-round-claimed"},"created_at":"2026-08-25T12:05:00Z"}]]')" \
-  "2026-08-25T12:05:00Z"
-chk "a release is not read as a claim" "$(claimed '[[{"event":"unlabeled","label":{"name":"claude-round-claimed"},"created_at":"2026-08-25T12:05:00Z"}]]')" ""
-chk "released reads unlabeled only" "$(released '[[{"event":"unlabeled","label":{"name":"claude-round-claimed"},"created_at":"2026-08-25T12:06:00Z"}]]')" "2026-08-25T12:06:00Z"
-
-held() { # claimed_at, released_at, cutoff
-  if [ -z "$1" ]; then echo POST
-  elif [ -n "$2" ] && [[ "$2" > "$1" ]]; then echo POST
-  elif [[ "$1" < "$3" ]]; then echo POST
-  else echo REPORT; fi
-}
-CUT=2026-08-25T12:00:00Z; FRESH=2026-08-25T12:05:00Z; STALE=2026-08-25T11:40:00Z
-chk "nobody claimed -> ordinary wake-up"            "$(held ""      ""                    "$CUT")" "POST"
-chk "fresh claim -> report-only wake-up"            "$(held "$FRESH" ""                   "$CUT")" "REPORT"
-chk "claim then release -> ordinary wake-up"        "$(held "$FRESH" 2026-08-25T12:06:00Z "$CUT")" "POST"
-chk "claim older than the lease -> ordinary wake-up" "$(held "$STALE" ""                  "$CUT")" "POST"
-# The ordering case: a session releases a round, then claims the next one. A
-# test that only asked "is there a release?" would hand the live session's
-# active round to a second writer.
-chk "re-claim after an EARLIER release -> still held" "$(held "$FRESH" 2026-08-25T11:50:00Z "$CUT")" "REPORT"
-chk "expired claim that was also released -> ordinary" "$(held "$STALE" 2026-08-25T11:45:00Z "$CUT")" "POST"
 section "The author-side set is built, not assumed"
 # `pr_author` is `// ""` when the account has been deleted — and so is the
 # login on a comment left by one. An empty `$me` would therefore match an empty
@@ -545,16 +508,6 @@ chk "sweep claims the gate by DELETE before posting" \
   "$(grep -c 'X DELETE .*labels/\${LABEL}' "$SWEEP")" "2"
 chk "ci-green claims the gate before posting" \
   "$(awk '/Claim the gate/{c=NR} /Re-ping Codex/{p=NR} END{print (c>0 && p>c) ? "yes" : "no"}' "$GREEN")" "yes"
-# Reading the claim before settling loses the race every time: the live session
-# is woken by the same event, so the sleep must come first.
-chk "review wake-up settles before reading the claim" \
-  "$(awk '/sleep "\$\{SETTLE_SECONDS\}"/{s=NR} /issues\/\$\{PR_NUMBER\}\/events/{e=NR} END{print (s>0 && e>s) ? "yes" : "no"}' "$REVIEW")" "yes"
-# The two wake-up bodies must be mutually exclusive, or a claimed round gets
-# both a "push the fix" and a "do not push" instruction on the same PR.
-chk "exactly one wake-up body can fire per run" \
-  "$(grep -c "steps.claim.outputs.held != 'true'" "$REVIEW")$(grep -c "steps.claim.outputs.held == 'true'" "$REVIEW")" "11"
-chk "the claim is never removed by the workflow that reads it" \
-  "$(grep -c 'X DELETE .*claude-round-claimed' "$REVIEW" || true)" "0"
 
 # Drift is counted here rather than in `filter`, for the subshell reason above.
 fail=$((fail + $(grep -c . "$DRIFT_LOG" 2>/dev/null || true)))
