@@ -23,8 +23,11 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 pass=0; fail=0
+DRIFT_LOG=$(mktemp)
+trap 'rm -f "$DRIFT_LOG"' EXIT
 SWEEP=.github/workflows/sweep-stalled-repings.yml
 GREEN=.github/workflows/wake-on-ci-green.yml
+THREADS=.github/workflows/sweep-unresolved-threads.yml
 
 chk() { # name, got, want
   if [ "$2" = "$3" ]; then pass=$((pass+1)); printf '  ok   %s\n' "$1"
@@ -34,10 +37,25 @@ chk() { # name, got, want
 # filter FILE 'jq filter' — assert the filter appears verbatim in FILE, then
 # echo it so the caller can run the very string it just verified ships.
 filter() {
-  local file="$1" f="$2"
-  if ! grep -qF -- "$f" "$file"; then
-    fail=$((fail+1))
-    printf '  FAIL drift: filter not found in %s\n         %s\n' "$file" "$f"
+  local file="$1" f="$2" content
+  # Substring match over the WHOLE file, not `grep -qF`. grep is line-based,
+  # and a multi-line -F pattern is treated as one fixed string PER LINE — it
+  # matches if ANY line appears anywhere. So a multi-line filter was "verified"
+  # by its least distinctive line (`| length` matches almost anything), and a
+  # real change to the shipped logic drifted silently. The single-line filters
+  # this harness started with were guarded correctly; the guard only became
+  # theatre when multi-line ones were registered with it.
+  content=$(cat "$file")
+  if [[ "$content" != *"$f"* ]]; then
+    # Reported on stderr and recorded in a file, not in `fail`. Every call site
+    # is `X=$(filter ...)`, so this body runs in a command-substitution
+    # subshell: `fail=$((fail+1))` there is discarded when the subshell exits,
+    # and anything printed on stdout is captured into the caller's variable
+    # instead of shown. Until both were fixed, a drift failed the suite only
+    # when it happened to break an assertion as well — a guard that reported
+    # itself and then exited 0.
+    printf '  FAIL drift: filter not found in %s\n         %s\n' "$file" "$f" >&2
+    printf 'x\n' >> "$DRIFT_LOG"
   fi
   printf '%s' "$f"
 }
@@ -257,17 +275,242 @@ chk "resumed, then escalated again -> stay quiet" \
   "$(esc '[[{"created_at":"2026-08-24T06:00:00Z","body":"<!-- codex-autopilot:hard-stop -->"}],[{"created_at":"2026-08-24T11:00:00Z","body":"<!-- codex-autopilot:hard-stop -->"}]]' 2026-08-24T08:00:00Z)" "1"
 
 # ---------------------------------------------------------------------------
+section "The author-side set is built, not assumed"
+# `pr_author` is `// ""` when the account has been deleted — and so is the
+# login on a comment left by one. An empty `$me` would therefore match an empty
+# last-author and read that thread as ANSWERED, which silences the sweep on
+# exactly the PR whose author is gone. The assertions below the fold were
+# passing while that was true, because they hand the filter a set rather than
+# building one.
+SIDE_F=$(filter "$THREADS" '[$me, "claude[bot]"] + $extra | map(select(. != ""))')
+side() { jq -c -n --arg me "$1" --argjson extra "${2:-[]}" "$SIDE_F"; }
+
+chk "the author and the bot" "$(side WEDDEsign)" '["WEDDEsign","claude[bot]"]'
+chk "extras are appended" "$(side WEDDEsign '["org-bot"]')" '["WEDDEsign","claude[bot]","org-bot"]'
+chk "a deleted author drops out rather than matching every deleted commenter" \
+  "$(side "")" '["claude[bot]"]'
+chk "an empty extra is dropped too" "$(side WEDDEsign '[""]')" '["WEDDEsign","claude[bot]"]'
+
+# ---------------------------------------------------------------------------
+section "Unresolved threads — who spoke last decides whether to wake"
+# The discriminator between "nobody answered" and "a conversation is in
+# progress". `auto-resolve-review-threads` accepts the PR author, claude[bot]
+# and any configured `extra_identities` as a resolve signal, so a thread any of
+# them spoke on LAST is one where the answer exists and the resolve is what
+# failed — reportable, but not something to wake a session onto. The sweep must
+# use the SAME set: a login the resolver treats as author-side and this one does
+# not is a thread that gets a wake-up nobody needed.
+KEYS_F=$(filter "$THREADS" '.[]
+              | select(.isResolved == false)
+              | select((.comments.nodes[-1].author.login // "") as $last
+                       | ($side | index($last)) | not)
+              | "\(.id) \(.comments.nodes[-1].id // "-")"')
+UNRESOLVED_F=$(filter "$THREADS" '[.[] | select(.isResolved == false)] | length')
+
+th() { # id, isResolved, last-author, last-comment-id
+  printf '{"id":"%s","isResolved":%s,"comments":{"nodes":[{"id":"%s","author":{"login":"%s"}}]}}' \
+    "$1" "$2" "$4" "$3"
+}
+doc() { printf '[%s]' "$(IFS=,; echo "$*")"; }
+
+SIDE='["WEDDEsign","claude[bot]"]'
+keys() { printf '%s' "$1" | jq -r --argjson side "${2:-$SIDE}" "$KEYS_F"; }
+unanswered() { printf '%s' "$(keys "$1" "${2:-$SIDE}")" | grep -c . || true; }
+unresolved() { printf '%s' "$1" | jq -r "$UNRESOLVED_F"; }
+
+REVIEWER=$(doc "$(th T1 false chatgpt-codex-connector C1)")
+AUTHOR=$(doc "$(th T1 false WEDDEsign C1)")
+BOT=$(doc "$(th T1 false 'claude[bot]' C1)")
+DONE=$(doc "$(th T1 true chatgpt-codex-connector C1)")
+MIXED=$(doc "$(th T1 false WEDDEsign C1)" "$(th T2 false chatgpt-codex-connector C2)")
+
+chk "reviewer spoke last -> wake" "$(unanswered "$REVIEWER")" "1"
+chk "author spoke last -> report only" "$(unanswered "$AUTHOR")" "0"
+chk "claude[bot] spoke last -> report only" "$(unanswered "$BOT")" "0"
+chk "resolved threads are never counted" "$(unanswered "$DONE")" "0"
+chk "resolved threads are not unresolved either" "$(unresolved "$DONE")" "0"
+chk "mixed: only the unanswered one wakes" "$(unanswered "$MIXED")" "1"
+chk "mixed: both count as unresolved" "$(unresolved "$MIXED")" "2"
+# A thread with no comments cannot happen via the UI, but a null author (a
+# deleted account) can. `// ""` must keep it counted rather than crashing the
+# filter — erring toward waking, since the alternative is a silent block.
+NULL_AUTHOR=$(doc '{"id":"T1","isResolved":false,"comments":{"nodes":[{"id":"C1","author":null}]}}')
+chk "null author reads as not-the-author -> wake" "$(unanswered "$NULL_AUTHOR")" "1"
+# The same thread on a PR whose own author is deleted. This is the case the
+# hand-written set above cannot reach: it only breaks once `$me` is built from
+# an empty `pr_author`, which is why the set construction is asserted on its
+# own further up.
+chk "a deleted author does not make a deleted commenter author-side" \
+  "$(unanswered "$NULL_AUTHOR" "$(side "")")" "1"
+# The `extra_identities` case: the caller template configures WEDDEsign on the
+# resolver, and on a PR opened by anyone else that login is author-side there.
+ORG=$(doc "$(th T1 false WEDDEsign C1)")
+chk "configured extra identity spoke last -> report only" \
+  "$(unanswered "$ORG" '["someone-else","claude[bot]","WEDDEsign"]')" "0"
+chk "the same login unconfigured -> wake" \
+  "$(unanswered "$ORG" '["someone-else","claude[bot]"]')" "1"
+
+# ---------------------------------------------------------------------------
+section "Drafts are not swept"
+# A draft cannot merge at all, so an unanswered thread is not what is blocking
+# it and the wake would name the wrong cause. The ceremony docs reserve
+# `--draft` for code that should not be reviewed yet, which is the same call
+# made from the other side.
+DRAFT_F=$(filter "$THREADS" '.[] | select(.draft != true) | .number')
+prs() { printf '%s' "$1" | jq -r "$DRAFT_F" | paste -sd, -; }
+
+chk "ready PRs are swept" "$(prs '[{"number":1,"draft":false}]')" "1"
+chk "drafts are skipped" "$(prs '[{"number":1,"draft":true}]')" ""
+chk "mixed: only the ready one" \
+  "$(prs '[{"number":1,"draft":true},{"number":2,"draft":false}]')" "2"
+# The field is always present on this endpoint, but a missing one must sweep
+# rather than skip: erring toward looking is how a recovery net fails safe.
+chk "an absent draft field is not a draft" "$(prs '[{"number":1}]')" "1"
+
+# ---------------------------------------------------------------------------
+section "Unresolved-thread keys identify the thread AND its last comment"
+# Keying the marker on the head alone suppressed a thread OPENED AFTER the
+# report, forever — the blocked-with-no-wake state the sweep exists to recover.
+# Both halves of the key are what fix it.
+chk "the key pairs thread with its last comment" \
+  "$(keys "$REVIEWER")" "T1 C1"
+chk "a new thread on the same head is a new key" \
+  "$(keys "$(doc "$(th T1 false codex C1)" "$(th T2 false codex C2)")" | paste -sd, -)" "T1 C1,T2 C2"
+chk "a new comment on the same thread is a new key" \
+  "$(keys "$(doc "$(th T1 false codex C9)")")" "T1 C9"
+# `comments(last:1)` cannot be empty for a real thread, but a missing id must
+# still produce a key rather than a null that silently collapses two threads.
+chk "a missing comment id still yields a key" \
+  "$(keys "$(doc '{"id":"T1","isResolved":false,"comments":{"nodes":[{"author":{"login":"codex"}}]}}')")" "T1 -"
+
+# ---------------------------------------------------------------------------
+section "The sweep stands down only when every key was already reported"
+# The marker is a SUPPRESSION signal: matching text from an arbitrary
+# commenter would let anyone hold `fresh` at zero and silence the net on the PR
+# it exists to recover. Only the identity the sweep posts under counts.
+SEEN_F=$(filter "$THREADS" '[.[][] | select(.user.login == $author) | .body | select(contains($p))
+                 | capture($p + "(?<k>[0-9a-f,]+)").k]
+                | join(",")')
+FRESH_F=$(filter "$THREADS" '($seen | split(",")) as $have
+              | [($tokens | split(","))[] | . as $t | select($have | index($t) | not)]
+              | length')
+SWEEPER=ceremony-bot
+seen() { printf '%s' "$1" | jq -r --arg p "$2" --arg author "${3:-$SWEEPER}" "$SEEN_F"; }
+cmt() { printf '{"user":{"login":"%s"},"body":"%s"}' "$1" "$2"; }
+fresh() { jq -r -n --arg tokens "$1" --arg seen "$2" "$FRESH_F"; }
+
+P_OLD='codex-autopilot:unresolved-threads aaaaaaaaaa keys='
+P_NEW='codex-autopilot:unresolved-threads bbbbbbbbbb keys='
+HIST="[[$(cmt "$SWEEPER" "woken <!-- ${P_OLD}11111111,22222222 -->")]]"
+
+chk "keys are read back off this head's marker" "$(seen "$HIST" "$P_OLD")" "11111111,22222222"
+chk "a new head has no marker of its own" "$(seen "$HIST" "$P_NEW")" ""
+chk "no history -> nothing reported" "$(seen '[[]]' "$P_OLD")" ""
+chk "two markers on one head union their keys" \
+  "$(seen "[[$(cmt "$SWEEPER" "<!-- ${P_OLD}11111111 -->"),$(cmt "$SWEEPER" "<!-- ${P_OLD}33333333 -->")]]" "$P_OLD")" \
+  "11111111,33333333"
+# A body mentioning the prefix without a key list must not blow up the read.
+chk "a prefix with no keys contributes nothing" \
+  "$(seen "[[$(cmt "$SWEEPER" "see ${P_OLD}")]]" "$P_OLD")" ""
+# Anyone can comment on a PR, and both halves of the marker are discoverable:
+# the format is in this file, the ids are in the API. An unauthenticated match
+# would let a commenter suppress the sweep indefinitely, with no error anywhere
+# — the net silenced on exactly the PR it exists for.
+chk "a marker from anyone else is ignored" \
+  "$(seen "[[$(cmt drive-by "<!-- ${P_OLD}11111111,22222222 -->")]]" "$P_OLD")" ""
+chk "a forged marker cannot mask a real one" \
+  "$(seen "[[$(cmt drive-by "<!-- ${P_OLD}99999999 -->"),$(cmt "$SWEEPER" "<!-- ${P_OLD}11111111 -->")]]" "$P_OLD")" \
+  "11111111"
+chk "the sweeper identity is compared exactly" \
+  "$(seen "$HIST" "$P_OLD" "${SWEEPER}-staging")" ""
+
+chk "unchanged state -> stand down" "$(fresh "11111111,22222222" "11111111,22222222")" "0"
+chk "a subset (some threads answered) -> stand down, no wake-storm" \
+  "$(fresh "22222222" "11111111,22222222")" "0"
+chk "a new thread or a new comment -> wake" \
+  "$(fresh "11111111,44444444" "11111111,22222222")" "1"
+chk "nothing reported yet -> wake" "$(fresh "11111111" "")" "1"
+chk "every key new -> wake" "$(fresh "55555555,66666666" "11111111")" "2"
+
+# ---------------------------------------------------------------------------
+section "Green means the NEWEST run of each required check, not any of them"
+# A re-run adds a second check run under the same name on the same SHA. Asking
+# whether ANY run succeeded lets a stale success outvote the failing re-run
+# that replaced it — and this sweep's whole output is the claim "green but
+# unmergeable", posted onto a PR that would in fact be red. `filter=latest` in
+# the URL already collapses this; the filter does not depend on it.
+MISSING_F=$(filter "$THREADS" '.[] as $req
+              | select((($have | map(select(.name == $req)) | sort_by(.started_at, .id)
+                         | last | .conclusion) == "success") | not)
+              | $req')
+run() { # name, conclusion, started_at, id
+  printf '{"name":"%s","conclusion":%s,"started_at":"%s","id":%s}' "$1" "$2" "$3" "$4"
+}
+missing() { printf '%s' "$1" | jq -r --argjson have "$2" "$MISSING_F" | paste -sd, -; }
+REQ='["pytest","build"]'
+
+chk "all required checks green -> nothing missing" \
+  "$(missing "$REQ" "[$(run pytest '"success"' 2026-08-25T10:00:00Z 1),$(run build '"success"' 2026-08-25T10:00:00Z 2)]")" ""
+chk "a required check absent -> missing" \
+  "$(missing "$REQ" "[$(run pytest '"success"' 2026-08-25T10:00:00Z 1)]")" "build"
+chk "a stale success does not outvote a failing re-run" \
+  "$(missing "$REQ" "[$(run pytest '"success"' 2026-08-25T10:00:00Z 1),$(run pytest '"failure"' 2026-08-25T11:00:00Z 9),$(run build '"success"' 2026-08-25T10:00:00Z 2)]")" "pytest"
+chk "a stale success does not outvote a re-run still in progress" \
+  "$(missing "$REQ" "[$(run pytest '"success"' 2026-08-25T10:00:00Z 1),$(run pytest null 2026-08-25T11:00:00Z 9),$(run build '"success"' 2026-08-25T10:00:00Z 2)]")" "pytest"
+chk "a newer success clears an older failure" \
+  "$(missing "$REQ" "[$(run pytest '"failure"' 2026-08-25T10:00:00Z 1),$(run pytest '"success"' 2026-08-25T11:00:00Z 9),$(run build '"success"' 2026-08-25T10:00:00Z 2)]")" ""
+# Re-runs started inside the same second are ordered by id, which GitHub
+# assigns monotonically — without the tiebreak, `last` would be arbitrary.
+chk "same started_at -> the higher check-run id wins" \
+  "$(missing "$REQ" "[$(run pytest '"success"' 2026-08-25T10:00:00Z 1),$(run pytest '"failure"' 2026-08-25T10:00:00Z 9),$(run build '"success"' 2026-08-25T10:00:00Z 2)]")" "pytest"
+
+# ---------------------------------------------------------------------------
 section "Drift guard — the shipped files still contain what was tested"
-for f in "$SWEEP" "$GREEN"; do
+for f in "$SWEEP" "$GREEN" "$THREADS"; do
   # Every comment/event/review/check-run read must paginate AND slurp. Without
   # --slurp, jq runs per page and an aggregate like `max` is computed per page.
   bad=$(grep -n 'gh api "repos' "$f" | grep -E 'comments\?|/events\?|/reviews\?|check-runs\?|/labels"' || true)
   chk "$(basename "$f"): no unpaginated collection reads" "${bad:-none}" "none"
 done
+# Two invariants of the threads sweep that are shell/GraphQL rather than jq, so
+# no assertion above can reach them. Both are silent under-reads when removed —
+# the sweep goes quiet on exactly the PRs it exists for — which is why they are
+# pinned here rather than left to review.
+chk "threads sweep pins filter=latest on the check-run read" \
+  "$(grep -c 'check-runs?per_page=100&filter=latest' "$THREADS")" "1"
+chk "threads sweep paginates the review-thread connection" \
+  "$(grep -c 'reviewThreads(first:100, after:$cursor)' "$THREADS")" "1"
+chk "threads sweep asks for the page cursor it pages on" \
+  "$(grep -c 'pageInfo { hasNextPage endCursor }' "$THREADS")" "1"
+# A read failure has to reach the run's CONCLUSION, not just the summary: the
+# retry note is only true for a transient failure, and a permission or token
+# problem fails identically on every tick while the run stays green. Shell, not
+# jq, so this is the only thing that can hold it.
+chk "threads sweep counts a failed read — thread read AND head re-check" \
+  "$(grep -c 'read_fail=$((read_fail + 1))' "$THREADS")" "2"
+chk "threads sweep stands down on an unreadable PR rather than posting" \
+  "$(grep -c 'if \[ -z "${after}" \]; then' "$THREADS")" "1"
+chk "threads sweep defers a dirty or unknown mergeable_state" \
+  "$(grep -cE '^ +(dirty|unknown)\)$' "$THREADS")" "2"
+# The base can advance without the head moving, so the pre-post check must
+# re-read BOTH — a head-only comparison passes while the PR is conflicted.
+chk "threads sweep re-reads mergeability with the head before posting" \
+  "$(grep -c "jq '.head.sha + \" \" + .mergeable_state'" "$THREADS")" "1"
+chk "threads sweep defers when mergeability changed under it" \
+  "$(grep -c 'state_now}" = "dirty" \] || \[ "${state_now}" = "unknown" \]' "$THREADS")" "1"
+chk "threads sweep refuses to run if it cannot authenticate its own markers" \
+  "$(grep -c 'if \[ -z "${marker_author}" \]; then' "$THREADS")" "1"
+chk "threads sweep exits nonzero on a failed thread read" \
+  "$(grep -c 'had_fatal}" -ne 0 ] || \[ "${read_fail}" -ne 0 \]' "$THREADS")" "1"
+chk "threads sweep does not claim a clean sweep after a failed read" \
+  "$(grep -c 'woke}" = "0" \] && \[ "${had_fatal}" = "0" \] && \[ "${read_fail}" = "0" \]' "$THREADS")" "1"
 chk "sweep claims the gate by DELETE before posting" \
   "$(grep -c 'X DELETE .*labels/\${LABEL}' "$SWEEP")" "2"
 chk "ci-green claims the gate before posting" \
   "$(awk '/Claim the gate/{c=NR} /Re-ping Codex/{p=NR} END{print (c>0 && p>c) ? "yes" : "no"}' "$GREEN")" "yes"
+
+# Drift is counted here rather than in `filter`, for the subshell reason above.
+fail=$((fail + $(grep -c . "$DRIFT_LOG" 2>/dev/null || true)))
 
 printf '\n%s\n' "-----------------------------------------------"
 printf '%d passed, %d failed\n' "$pass" "$fail"

@@ -88,6 +88,35 @@ summary, because they still need a person: a merge conflict (CI cannot run at
 all, so there is nothing green to re-ping against) and required checks that were
 cancelled or timed out (`wake-on-ci-red` fires on `failure` only).
 
+### The unresolved-thread sweep (only where the ruleset requires resolution)
+
+`auto-resolve-review-threads` closes a thread when the author side **replies**
+on it. The reply is the resolve signal — nothing carries "commit pushed"
+through to "thread closed". Where the repo's ruleset requires conversation
+resolution, that makes a forgotten reply a merge block on a PR whose checks are
+all green, and GitHub names no reason for it: *"Cannot merge at this time"*,
+with less than that on mobile. NordScope#1226 sat there for nine hours on nine
+unreplied threads, every finding already fixed in code.
+
+`sweep-unresolved-threads` is the level-triggered net under it, on the same
+argument as the re-ping sweep: a session that forgets to reply has by
+construction not read the doc telling it to, and nothing on the PR page prompts
+it to look. It wakes only where a session can act — an unresolved thread whose
+*last* comment is the reviewer's. A thread the author side answered last is
+reported in the run summary and nothing more, because that is either a failed
+resolve or a live argument, and waking someone into an argument is noise.
+
+It does **not** replace `sweep-stalled-repings` and does not share its
+enumeration: that sweep looks at PRs carrying the gate label, because a missed
+re-ping is by definition gated, whereas this condition has no label at all.
+Give it the same `required_checks` as `wake-on-ci-green` and the same
+`extra_identities` as `auto-resolve-review-threads` — the second matters
+because the resolver treats those logins as author-side, and a sweep that
+disagreed would wake a session onto a thread the resolver considers answered.
+
+Skip it entirely in a repo whose ruleset does not require conversation
+resolution: there an open thread blocks nothing, and every wake would be noise.
+
 ### Reusable-workflow notes
 
 - **Each caller needs its own `permissions:` block.** A called (reusable)

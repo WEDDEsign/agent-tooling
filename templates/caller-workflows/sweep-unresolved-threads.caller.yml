@@ -1,0 +1,69 @@
+# Per-repo caller — copy to <repo>/.github/workflows/sweep-unresolved-threads.yml
+#
+# The recovery net under auto-resolve-review-threads. Add it wherever that
+# workflow is installed AND the repo's ruleset requires conversation
+# resolution; without that ruleset setting an open thread blocks nothing and
+# this has no job to do.
+#
+# THE BUG IT COVERS
+# `auto-resolve-review-threads` closes a thread when the author side REPLIES on
+# it — the reply is the resolve signal, and nothing carries "commit pushed"
+# through to "thread closed". Fix a finding in code, forget the reply, and the
+# merge stays blocked while every check is green: GitHub renders "Cannot merge
+# at this time" naming no reason, and mobile shows less than that. NordScope
+# #1226 sat there for nine hours on nine unreplied threads, every finding
+# already fixed. Documenting the rule does not close it — a session that forgot
+# to reply has by construction not consulted the doc, and nothing on the PR
+# page prompts it to look. Only something reading current state catches it.
+#
+# This is SEPARATE from sweep-stalled-repings and does not replace it. That one
+# enumerates PRs carrying the gate label, because a missed re-ping is by
+# definition gated; this condition has no label at all — #1226 carried only
+# `codex-round-3` while it was blocked.
+#
+# Fill in TWO repo-specific values:
+#   `required_checks`   — a JSON array of check-RUN names. Use the SAME value
+#     as this repo's wake-on-ci-green caller. A PR whose required checks are
+#     not green is blocked on CI, not on threads, and is deliberately not
+#     looked at.
+#   `extra_identities`  — the SAME value as this repo's
+#     auto-resolve-review-threads caller, or omit it if that one omits it.
+#     That workflow treats a reply from these logins as a resolve signal, so a
+#     thread they answered last is answered here too; a sweep that disagreed
+#     would wake a session onto a thread the resolver already considers handled.
+#
+# The `permissions:` block is REQUIRED (callers must grant what the reusable
+# needs; default tokens are read-only). Requires a `CEREMONY_PAT` secret.
+name: Sweep unresolved review threads
+
+on:
+  schedule:
+    # Every 10 minutes, offset from sweep-stalled-repings so the two do not
+    # contend for API budget on the same tick. A blocked PR is recovered within
+    # one interval instead of sitting until someone notices.
+    #
+    # NOTE: GitHub disables scheduled workflows after 60 days with no repo
+    # activity. On a quiet repo, re-enable it in the Actions tab.
+    - cron: '4-59/10 * * * *'
+
+  # So a PR noticed as stuck can be swept immediately rather than waiting out
+  # the interval.
+  workflow_dispatch:
+
+permissions:
+  pull-requests: write
+  issues: write
+  contents: read
+  checks: read
+
+jobs:
+  call:
+    uses: WEDDEsign/agent-tooling/.github/workflows/sweep-unresolved-threads.yml@v0.1.6
+    with:
+      # JSON array string. Names with spaces/parens are fine.
+      required_checks: '["Backend (pytest)","Backend integration (Firestore emulator)","Frontend (tsc + build)"]'
+      # Comma-separated. Match auto-resolve-review-threads.caller.yml exactly.
+      extra_identities: 'WEDDEsign'
+      escalation_handle: '@WEDDEsign'
+    secrets:
+      CEREMONY_PAT: ${{ secrets.CEREMONY_PAT }}
