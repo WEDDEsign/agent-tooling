@@ -25,6 +25,7 @@ cd "$(dirname "$0")/.."
 pass=0; fail=0
 SWEEP=.github/workflows/sweep-stalled-repings.yml
 GREEN=.github/workflows/wake-on-ci-green.yml
+THREADS=.github/workflows/sweep-unresolved-threads.yml
 
 chk() { # name, got, want
   if [ "$2" = "$3" ]; then pass=$((pass+1)); printf '  ok   %s\n' "$1"
@@ -34,8 +35,16 @@ chk() { # name, got, want
 # filter FILE 'jq filter' — assert the filter appears verbatim in FILE, then
 # echo it so the caller can run the very string it just verified ships.
 filter() {
-  local file="$1" f="$2"
-  if ! grep -qF -- "$f" "$file"; then
+  local file="$1" f="$2" content
+  # Substring match over the WHOLE file, not `grep -qF`. grep is line-based,
+  # and a multi-line -F pattern is treated as one fixed string PER LINE — it
+  # matches if ANY line appears anywhere. So a multi-line filter was "verified"
+  # by its least distinctive line (`| length` matches almost anything), and a
+  # real change to the shipped logic drifted silently. The single-line filters
+  # this harness started with were guarded correctly; the guard only became
+  # theatre when multi-line ones were registered with it.
+  content=$(cat "$file")
+  if [[ "$content" != *"$f"* ]]; then
     fail=$((fail+1))
     printf '  FAIL drift: filter not found in %s\n         %s\n' "$file" "$f"
   fi
@@ -257,8 +266,65 @@ chk "resumed, then escalated again -> stay quiet" \
   "$(esc '[[{"created_at":"2026-08-24T06:00:00Z","body":"<!-- codex-autopilot:hard-stop -->"}],[{"created_at":"2026-08-24T11:00:00Z","body":"<!-- codex-autopilot:hard-stop -->"}]]' 2026-08-24T08:00:00Z)" "1"
 
 # ---------------------------------------------------------------------------
+section "Unresolved threads — who spoke last decides whether to wake"
+# The discriminator between "nobody answered" and "a conversation is in
+# progress". `auto-resolve-review-threads` accepts the PR author and
+# claude[bot] as a resolve signal, so a thread either of them spoke on LAST is
+# one where the answer exists and the resolve is what failed — reportable, but
+# not something to wake a session onto.
+UNANSWERED_F=$(filter "$THREADS" '[.data.repository.pullRequest.reviewThreads.nodes[]
+               | select(.isResolved == false)
+               | select((.comments.nodes[-1].author.login // "") as $last
+                        | $last != $me and $last != "claude[bot]")]
+              | length')
+UNRESOLVED_F=$(filter "$THREADS" '[.data.repository.pullRequest.reviewThreads.nodes[]
+               | select(.isResolved == false)] | length')
+
+th() { # isResolved, last-author -> one thread node
+  printf '{"isResolved":%s,"comments":{"nodes":[{"author":{"login":"%s"}}]}}' "$1" "$2"
+}
+doc() { printf '{"data":{"repository":{"pullRequest":{"author":{"login":"WEDDEsign"},"reviewThreads":{"nodes":[%s]}}}}}' "$(IFS=,; echo "$*")"; }
+unanswered() { printf '%s' "$1" | jq -r --arg me WEDDEsign "$UNANSWERED_F"; }
+unresolved() { printf '%s' "$1" | jq -r "$UNRESOLVED_F"; }
+
+REVIEWER=$(doc "$(th false chatgpt-codex-connector)")
+AUTHOR=$(doc "$(th false WEDDEsign)")
+BOT=$(doc "$(th false 'claude[bot]')")
+DONE=$(doc "$(th true chatgpt-codex-connector)")
+
+chk "reviewer spoke last -> wake" "$(unanswered "$REVIEWER")" "1"
+chk "author spoke last -> report only" "$(unanswered "$AUTHOR")" "0"
+chk "claude[bot] spoke last -> report only" "$(unanswered "$BOT")" "0"
+chk "resolved threads are never counted" "$(unanswered "$DONE")" "0"
+chk "resolved threads are not unresolved either" "$(unresolved "$DONE")" "0"
+chk "mixed: only the unanswered one wakes" \
+  "$(unanswered "$(doc "$(th false WEDDEsign)" "$(th false chatgpt-codex-connector)")")" "1"
+chk "mixed: both count as unresolved" \
+  "$(unresolved "$(doc "$(th false WEDDEsign)" "$(th false chatgpt-codex-connector)")")" "2"
+# A thread with no comments cannot happen via the UI, but a null author (a
+# deleted account) can. `// ""` must keep it counted rather than crashing the
+# filter — erring toward waking, since the alternative is a silent block.
+chk "null author reads as not-the-author -> wake" \
+  "$(unanswered "$(doc '{"isResolved":false,"comments":{"nodes":[{"author":null}]}}')")" "1"
+
+# ---------------------------------------------------------------------------
+section "Unresolved-thread marker is keyed on the head, not on time"
+# The sibling sweep's header records two timestamp anchors that were tried for
+# "which head does this belong to" and were both wrong in the same direction.
+# This sidesteps the question: the marker carries the SHA, so a new head is
+# eligible again and an old one is not.
+SEEN_F=$(filter "$THREADS" '[.[][] | select(.body | contains($m))] | length')
+seen() { printf '%s' "$1" | jq -r --arg m "$2" "$SEEN_F"; }
+M_OLD='<!-- codex-autopilot:unresolved-threads aaaaaaaaaa -->'
+M_NEW='<!-- codex-autopilot:unresolved-threads bbbbbbbbbb -->'
+HIST="[[{\"body\":\"woken ${M_OLD}\"}]]"
+chk "same head -> already reported" "$(seen "$HIST" "$M_OLD")" "1"
+chk "new head -> eligible again" "$(seen "$HIST" "$M_NEW")" "0"
+chk "no history -> eligible" "$(seen '[[]]' "$M_OLD")" "0"
+
+# ---------------------------------------------------------------------------
 section "Drift guard — the shipped files still contain what was tested"
-for f in "$SWEEP" "$GREEN"; do
+for f in "$SWEEP" "$GREEN" "$THREADS"; do
   # Every comment/event/review/check-run read must paginate AND slurp. Without
   # --slurp, jq runs per page and an aggregate like `max` is computed per page.
   bad=$(grep -n 'gh api "repos' "$f" | grep -E 'comments\?|/events\?|/reviews\?|check-runs\?|/labels"' || true)

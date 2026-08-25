@@ -1,0 +1,259 @@
+name: Sweep green PRs with unresolved review threads (reusable)
+
+# The recovery net under `auto-resolve-review-threads`.
+#
+# THE BUG THIS EXISTS FOR
+# A ruleset that requires conversation resolution turns every open review
+# thread into a merge block. `auto-resolve-review-threads` closes a thread when
+# the author side REPLIES on it — so the reply is the resolve signal, and
+# nothing carries "commit pushed" through to "thread closed". Fix a finding in
+# code, forget the reply, and the thread stays open: the merge stays blocked
+# while every check is green, GitHub renders "Cannot merge at this time" naming
+# no reason, and mobile shows less than that.
+#
+# NordScope#1226 sat in exactly that state for nine hours on nine unreplied
+# threads, every finding already fixed in code. The session that owned it read
+# the green checks, inferred it was waiting on an approving review, and
+# repeated that diagnosis across three scheduled check-ins without re-testing
+# it. Nothing anywhere said "unresolved threads".
+#
+# WHY DOCUMENTING IT IS NOT ENOUGH
+# The consuming repo now records the rule. But a session that forgets to reply
+# has, by construction, not consulted the doc — and the block is invisible from
+# the PR page, so nothing prompts it to look. Only something that reads current
+# state catches this, which is the same argument that produced
+# `sweep-stalled-repings`: a race you can lose while following the instruction
+# correctly needs a level-triggered net, not a better instruction.
+#
+# WHY THIS IS A SEPARATE WORKFLOW AND NOT A JOB IN THAT SWEEP
+# Different population. That sweep enumerates PRs carrying the gate label,
+# because a missed re-ping is by definition gated. This condition has no label:
+# NordScope#1226 carried only `codex-round-3` while it was blocked. Sharing the
+# enumeration would mean either widening that sweep to every open PR — paying
+# its whole decision tree for PRs that are not gated — or missing exactly the
+# PRs this exists for.
+#
+# WHAT MAKES IT SAFE TO RE-RUN
+# The marker comment carries the HEAD SHA it was posted for, and a head that
+# already has one is skipped. Identity, not time — the sibling sweep's header
+# records two timestamp anchors that were tried for "which head does this
+# belong to" and were both wrong in the same direction, and this avoids the
+# question entirely. Push a new commit and the PR becomes eligible again, which
+# is correct: the threads are still open against code that has moved.
+#
+# WHAT IT WAKES ON, AND WHAT IT ONLY REPORTS
+# Woken:
+#   - an unresolved thread whose LAST comment is from the reviewer. Nobody has
+#     answered, so either the fix landed without a reply or the finding is
+#     genuinely unhandled. Both are recoverable by a session that can reply.
+# Reported only:
+#   - an unresolved thread the author side answered LAST. Either
+#     `auto-resolve-review-threads` failed, or the thread is a live
+#     conversation someone is deliberately holding open. Waking a session onto
+#     an argument in progress is noise, and the summary is enough for a human
+#     to notice a stuck resolve.
+# Not looked at at all:
+#   - PRs whose required checks are not green. They are blocked on CI, which
+#     wakes its own paths; an unresolved thread is not what is stopping them.
+
+on:
+  workflow_call:
+    inputs:
+      required_checks:
+        description: 'JSON array of required check-run names that must all be success before a PR counts as green. Use the SAME value as the wake-on-ci-green caller.'
+        type: string
+        required: true
+      wake_handle:
+        description: 'Who to wake for the recoverable case. The Claude GitHub App no-ops on mentions authored by github-actions[bot], which is why the post below uses CEREMONY_PAT.'
+        type: string
+        default: '@Claude'
+      escalation_handle:
+        type: string
+        default: '@WEDDEsign'
+
+    secrets:
+      CEREMONY_PAT:
+        required: true
+
+permissions:
+  pull-requests: write
+  issues: write
+  contents: read
+  checks: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+
+    # Serializes sweeps against each other. Two overlapping runs would both
+    # read the same un-marked PR and both post, because the marker is only
+    # visible after the first one's comment lands. `cancel-in-progress: false`
+    # so a sweep mid-post finishes rather than being truncated between the
+    # check and the marker.
+    concurrency:
+      group: unresolved-threads-sweep
+      cancel-in-progress: false
+
+    steps:
+      - name: Sweep green PRs for unresolved review threads
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CEREMONY_PAT: ${{ secrets.CEREMONY_PAT }}
+          REPO: ${{ github.repository }}
+          REQUIRED_CHECKS: ${{ inputs.required_checks }}
+          WAKE_HANDLE: ${{ inputs.wake_handle }}
+          ESCALATION_HANDLE: ${{ inputs.escalation_handle }}
+        run: |
+          set -euo pipefail
+
+          note() { printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"; }
+
+          owner="${REPO%%/*}"; name="${REPO##*/}"
+
+          note "## Unresolved-thread sweep"
+          note ""
+
+          # Every open PR, not a label-filtered subset — see the header on why
+          # this population differs from the re-ping sweep's. --paginate so a
+          # repo with more than 100 open PRs does not leave the tail unswept
+          # forever, which is the one failure a recovery net must not have.
+          prs=$(gh api --paginate "repos/${REPO}/pulls?state=open&per_page=100" \
+            --jq '.[] | .number')
+
+          if [ -z "${prs}" ]; then
+            note "No open PRs. Nothing to sweep."
+            exit 0
+          fi
+
+          woke=0
+          had_fatal=0
+
+          note "| PR | Outcome |"
+          note "| --- | --- |"
+
+          for pr in ${prs}; do
+            head_sha=$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha')
+
+            # Green first, and cheaply: a PR blocked on CI is not blocked on
+            # threads, and skipping it here avoids a GraphQL round-trip per PR
+            # per sweep. Same jq shape as the re-ping sweep — bind $req so the
+            # inner .name is not shadowed by jq's rebinding of `.`.
+            # --paginate --slurp because a long-lived PR accumulates check runs
+            # across re-runs, and past 100 a required check on a later page is
+            # simply absent, which would read as "not green" forever.
+            runs=$(gh api --paginate --slurp "repos/${REPO}/commits/${head_sha}/check-runs?per_page=100" \
+              | jq -c '[.[].check_runs[] | {name, conclusion}]')
+            missing=$(printf '%s' "${REQUIRED_CHECKS}" | jq -r --argjson have "${runs}" '
+              .[] as $req
+              | select(($have | any(.name == $req and .conclusion == "success")) | not)
+              | $req')
+
+            [ -n "${missing}" ] && continue
+
+            # `isResolved` is not in REST; the review-thread connection is
+            # GraphQL-only. Each thread carries its comments in order, so the
+            # LAST author is the discriminator between "nobody answered" and
+            # "a conversation is in progress" — see the header.
+            threads=$(gh api graphql \
+              -f owner="${owner}" -f name="${name}" -F pr="${pr}" \
+              -f query='
+                query($owner:String!, $name:String!, $pr:Int!) {
+                  repository(owner:$owner, name:$name) {
+                    pullRequest(number:$pr) {
+                      author { login }
+                      reviewThreads(first:100) {
+                        nodes {
+                          isResolved
+                          isOutdated
+                          path
+                          comments(last:1) { nodes { author { login } } }
+                        }
+                      }
+                    }
+                  }
+                }' 2>/dev/null || echo "")
+
+            if [ -z "${threads}" ]; then
+              note "| #${pr} | ⚠️ could not read review threads — skipped, will retry next sweep |"
+              continue
+            fi
+
+            pr_author=$(printf '%s' "${threads}" | jq -r '.data.repository.pullRequest.author.login // ""')
+
+            # Unresolved threads whose last comment is NOT from the author
+            # side. `claude[bot]` and the PR author are both author-side: those
+            # are the identities `auto-resolve-review-threads` accepts as a
+            # resolve signal, so a thread they spoke on last is one where the
+            # answer exists and the resolve is what failed.
+            unanswered=$(printf '%s' "${threads}" | jq -r --arg me "${pr_author}" '
+              [.data.repository.pullRequest.reviewThreads.nodes[]
+               | select(.isResolved == false)
+               | select((.comments.nodes[-1].author.login // "") as $last
+                        | $last != $me and $last != "claude[bot]")]
+              | length')
+
+            unresolved=$(printf '%s' "${threads}" | jq -r '
+              [.data.repository.pullRequest.reviewThreads.nodes[]
+               | select(.isResolved == false)] | length')
+
+            [ "${unresolved}" = "0" ] && continue
+
+            if [ "${unanswered}" = "0" ]; then
+              note "| #${pr} | 💬 ${unresolved} unresolved, all answered — resolve may have failed, or a live conversation |"
+              continue
+            fi
+
+            # Idempotency, keyed on the HEAD rather than on a timestamp. A
+            # marker for this exact SHA means this head was already reported;
+            # a push makes the PR eligible again, which is right, because the
+            # threads are now open against code that has moved.
+            marker="<!-- codex-autopilot:unresolved-threads ${head_sha} -->"
+            seen=$(gh api --paginate --slurp "repos/${REPO}/issues/${pr}/comments?per_page=100" \
+              | jq -r --arg m "${marker}" '[.[][] | select(.body | contains($m))] | length')
+
+            if [ "${seen}" != "0" ]; then
+              note "| #${pr} | ⏸️ ${unanswered} unanswered — already reported for \`${head_sha:0:10}\` |"
+              continue
+            fi
+
+            # The head may have moved since the check-run read. Posting now
+            # would name a SHA whose threads were never examined, and would
+            # write a marker suppressing the next sweep's look at the real
+            # head. Re-read and stand down; nothing has been consumed.
+            head_now=$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha' || echo "")
+            if [ -n "${head_now}" ] && [ "${head_now}" != "${head_sha}" ]; then
+              note "| #${pr} | ↩️ head moved to \`${head_now:0:10}\` mid-sweep — next sweep re-evaluates |"
+              continue
+            fi
+
+            if ! GH_TOKEN="${CEREMONY_PAT}" gh pr comment "${pr}" --repo "${REPO}" \
+              --body "${WAKE_HANDLE} — this PR is **green but unmergeable**: ${unanswered} review thread(s) are unresolved with no reply from the author side.
+
+          The ruleset requires conversation resolution, and \`auto-resolve-review-threads\` fires on a **reply**, not on a push — so a finding fixed in code with no reply on its thread leaves the merge blocked while every check is green. GitHub shows no reason for this. NordScope#1226 sat here for nine hours.
+
+          Read each unresolved thread and, for every one you act on, **reply on the thread itself** — that is what closes it. Reply on the ones you are not fixing too, saying why; a won't-fix that is never said leaves the same block.
+
+          Head \`${head_sha:0:10}\`. If you push a fix, this sweep will look again at the new head.
+
+          ${marker}"; then
+              had_fatal=1
+              note "| #${pr} | 🚨 ${unanswered} unanswered but the wake could not be posted |"
+              echo "::error::#${pr} is green with ${unanswered} unanswered threads and the wake-up comment failed."
+              continue
+            fi
+
+            woke=$((woke + 1))
+            note "| #${pr} | 🔔 **woken** — ${unanswered} of ${unresolved} unresolved thread(s) unanswered on \`${head_sha:0:10}\` |"
+            echo "Woke ${WAKE_HANDLE} on #${pr} for ${unanswered} unanswered threads."
+          done
+
+          if [ "${woke}" = "0" ] && [ "${had_fatal}" = "0" ]; then
+            note ""
+            note "No green PR is blocked on an unanswered thread."
+          fi
+
+          if [ "${had_fatal}" -ne 0 ]; then
+            note ""
+            note "> 🚨 ${ESCALATION_HANDLE} — at least one blocked PR could not be reported. See the errors above."
+            exit 1
+          fi
