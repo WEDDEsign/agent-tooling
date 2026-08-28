@@ -22,18 +22,23 @@ Immediately after opening or adopting a Codex-owned PR:
 4. Record a head-activation boundary in this task. For the PR's initial head,
    use the PR creation event. For every later head, use the database ID and
    creation time of the bare review-trigger comment posted for that exact head.
-   This boundary is what makes a later comment-based approval attributable to
-   the current head.
+   When adopting an existing head that has neither boundary, first read and
+   ledger its existing events, then record the adoption check's time as that
+   head's fallback boundary. This boundary is what makes a later comment-based
+   approval attributable to the current head and starts the no-verdict timer;
+   never accept a pre-adoption comment against the fallback boundary.
 
 Each scheduled run should:
 
 - Query the PR state, mergeability, current head SHA, required checks, all
-  submitted reviews, top-level PR conversation comments (including author and
-  association), and all inline review threads. Treat each review or comment
-  database ID as the delivery key and keep a handled-event ledger in this task
-  so a later poll cannot process the same event twice. Also keep the last-seen
-  resolution state for every thread: a resolved-to-unresolved transition is
-  new activity even when the thread contains no new comment ID.
+  submitted reviews, top-level PR conversation comments (including author,
+  association, and `updatedAt`), and all inline review threads and comments
+  (including each comment's `updatedAt`). Use a review's database ID as its
+  delivery key and a mutable comment's `(database ID, updatedAt)` pair as its
+  delivery key. Keep a handled-event ledger in this task so an unchanged event
+  cannot be processed twice while an edited comment is re-evaluated. Also keep
+  the last-seen resolution state for every thread: a resolved-to-unresolved
+  transition is new activity even when the thread contains no new comment ID.
 - Apply the repository's approval rules only after authenticating the signal.
   A submitted review supplies its reviewer identity. For a top-level approval
   token, reject the PR author and require either an explicitly requested
@@ -54,14 +59,14 @@ Each scheduled run should:
   the update terse. If the current head still has no Codex verdict about 30
   minutes after its activation boundary, pause and ask the user to invoke the
   repository's recovery trigger instead of polling indefinitely.
-- Classify every new submitted review, top-level conversation comment, and
-  reopened inline thread before recording it as handled. For a reopened thread,
-  re-evaluate its underlying feedback against the current head even when no new
-  comment was added. For actionable feedback from any source, resume the author
-  loop in this same task: assess every finding, make agreed mechanical fixes,
-  verify them, push, and reply to each addressed thread with the fix and commit
-  SHA. Follow the repository's own author-side review rules for round caps and
-  scope.
+- Classify every new submitted review, new or edited top-level conversation
+  comment, new or edited inline thread comment, and reopened inline thread
+  before recording it as handled. For a reopened thread, re-evaluate its
+  underlying feedback against the current head even when no new comment was
+  added. For actionable feedback from any source, resume the author loop in
+  this same task: assess every finding, make agreed mechanical fixes, verify
+  them, push, and reply to each addressed thread with the fix and commit SHA.
+  Follow the repository's own author-side review rules for round caps and scope.
 - A non-approving Codex review with no top-level finding and no inline finding
   is a content-free pass, not approval. Record its review ID, then allow one
   exceptional retry on the same head even though that head was already
