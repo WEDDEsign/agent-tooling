@@ -34,3 +34,11 @@ jobs:
       # while the shipped workflow says something else.
       - name: Decision logic holds
         run: bash scripts/test-decision-logic.sh
+
+  codex-heartbeat:
+    name: Codex heartbeat
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sync and ownership invariants hold
+        run: python codex/tests/test_heartbeat_tools.py

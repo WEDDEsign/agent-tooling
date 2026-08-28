@@ -13,34 +13,44 @@ END = "<!-- weddesign-codex-pr-heartbeat:end -->"
 SOURCE = Path(__file__).parent / "pr-review-heartbeat" / "SKILL.md"
 
 
-def render_section() -> str:
+def render_section(newline: str = "\n") -> str:
     skill = SOURCE.read_text(encoding="utf-8")
     _, _, remainder = skill.partition("---\n")
     _, separator, procedure = remainder.partition("---\n")
     if not separator:
         raise ValueError(f"missing YAML frontmatter in {SOURCE}")
     procedure = procedure.strip()
-    return f"{START}\n\n{procedure}\n\n{END}\n"
+    section = f"{START}\n\n{procedure}\n\n{END}\n"
+    return section.replace("\n", newline)
 
 
-def sync(target: Path) -> str:
-    section = render_section()
-    existing = target.read_text(encoding="utf-8") if target.exists() else ""
+def sync_content(existing: str) -> tuple[str, str]:
+    newline = "\r\n" if "\r\n" in existing else "\n"
+    section = render_section(newline)
 
     if START in existing and END in existing:
         before, remainder = existing.split(START, 1)
         _, after = remainder.split(END, 1)
-        updated = before.rstrip("\n") + "\n\n" + section + after.lstrip("\n")
+        before = before.rstrip("\r\n")
+        separator = newline * 2 if before else ""
+        updated = before + separator + section + after.lstrip("\r\n")
         action = "updated"
     elif existing.strip():
-        updated = existing.rstrip("\n") + "\n\n" + section
+        updated = existing.rstrip("\r\n") + newline * 2 + section
         action = "appended to"
     else:
         updated = section
         action = "created"
 
+    return updated, action
+
+
+def sync(target: Path) -> str:
+    existing = target.read_bytes().decode("utf-8") if target.exists() else ""
+    updated, action = sync_content(existing)
+
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(updated, encoding="utf-8", newline="\n")
+    target.write_bytes(updated.encode("utf-8"))
     return action
 
 

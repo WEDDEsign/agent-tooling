@@ -68,7 +68,9 @@ agent-tooling/
 1. **Labels** (one-time): `labels/sync-labels.sh WEDDEsign/<repo>`
 2. **Plugin**: commit `.claude/settings.json` with the marketplace + `enabledPlugins`
    (see `docs/per-repo-wiring.md`).
-3. **Workflows**: copy the matching `templates/caller-workflows/*` into the repo's
+3. **Codex heartbeat**: run
+   `python codex/sync-pr-review-heartbeat.py /path/to/repo/AGENTS.md`.
+4. **Workflows**: copy the matching `templates/caller-workflows/*` into the repo's
    `.github/workflows/`, set the repo-specific check names, add the `CEREMONY_PAT`
    secret.
 

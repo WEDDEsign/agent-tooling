@@ -30,7 +30,12 @@ Each scheduled run should:
   comments as well as submitted reviews.
 - Compare the reviewed commit with the current PR head. If they differ, report
   the review as stale and confirm that each finding still applies before
-  changing code.
+  changing code. Never treat an approval on an older commit as terminal. A
+  submitted approval is current only when its reviewed commit matches a
+  freshly read head. For a top-level approval comment with no reviewed commit,
+  require that it was created after the current head commit and that the head
+  remains unchanged across the approval check; otherwise request a fresh
+  review.
 - If there is no new activity, make no repository or GitHub changes and keep
   the update terse.
 - For a new actionable review, resume the author loop in this same task:
@@ -38,9 +43,10 @@ Each scheduled run should:
   reply to each addressed thread with the fix and commit SHA. Follow the
   repository's own author-side review rules for round caps and scope.
 - After a fix head's required checks are green, request the next Codex review
-  exactly once for that head, using the repository's bare review trigger. If
-  checks fail, diagnose and fix failures caused by the PR before requesting
-  another review.
+  exactly once for that head, using the repository's bare review trigger.
+  Immediately before posting, re-read both the head and the latest required
+  check states; abort the request if either changed. If checks fail, diagnose
+  and fix failures caused by the PR before requesting another review.
 - Treat a merge conflict that prevents checks from starting, a cancelled or
   timed-out required check, and a required status that remains missing as
   recovery states rather than ordinary waiting. Follow the repository's
