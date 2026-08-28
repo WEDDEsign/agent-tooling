@@ -14,9 +14,10 @@ name: Wake Claude on Codex review (reusable)
 # authored by github-actions[bot] (bot-to-bot loop guard), so the wake-up must
 # be posted under a human identity.
 #
-# Skip cases: APPROVED state / APPROVED token / "no major issues" template /
-# non-Codex author / zero inline comments. Hard-stop at round >= 25 swaps the
-# @Claude wake-up for an escalation_handle ping + `loop-stuck` label.
+# Skip cases: Codex-owned branch or label / APPROVED state / APPROVED token /
+# "no major issues" template / non-Codex author / zero inline comments.
+# Hard-stop at round >= 25 swaps the @Claude wake-up for an escalation_handle
+# ping + `loop-stuck` label.
 
 on:
   workflow_call:
@@ -43,6 +44,8 @@ jobs:
   wake_claude:
     if: >-
       github.event.review.user.login == 'chatgpt-codex-connector[bot]' &&
+      !startsWith(github.event.pull_request.head.ref, 'codex/') &&
+      !contains(github.event.pull_request.labels.*.name, 'codex-only') &&
       github.event.review.state != 'approved' &&
       !contains(github.event.review.body, 'APPROVED') &&
       !contains(github.event.review.body, 'Codex Review: Didn''t find any major issues')
