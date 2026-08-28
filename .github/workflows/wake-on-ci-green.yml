@@ -191,11 +191,39 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -eu
           if gh api -X DELETE \
             "repos/${REPO}/issues/${PR_NUMBER}/labels/awaiting-codex-reping" \
             >/dev/null 2>&1; then
+            # The PR can move after the green-check gate read but before this
+            # atomic claim. Re-read after winning, and restore the gate instead
+            # of posting against a head whose checks were never verified. Match
+            # the scheduled sweep's handling of a head move or newly dirty /
+            # still-unknown mergeability.
+            after=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
+              --jq '.head.sha + " " + .mergeable_state' || echo "")
+            head_now="${after%% *}"
+            state_now="${after##* }"
+            if [ -z "${after}" ] || [ "${head_now}" != "${HEAD_SHA}" ] || \
+               [ "${state_now}" = "dirty" ] || [ "${state_now}" = "unknown" ]; then
+              if [ -z "${after}" ]; then
+                why="the post-claim PR read failed"
+              elif [ "${head_now}" != "${HEAD_SHA}" ]; then
+                why="the head moved from ${HEAD_SHA} to ${head_now}"
+              else
+                why="mergeability became ${state_now}"
+              fi
+              if gh api -X POST "repos/${REPO}/issues/${PR_NUMBER}/labels" \
+                -f "labels[]=awaiting-codex-reping" >/dev/null 2>&1; then
+                echo "${why} after the gate was claimed — restored the gate and standing down."
+                echo "won=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "::error::${why} after the gate was claimed, and the gate could not be restored. Re-apply awaiting-codex-reping by hand."
+              exit 1
+            fi
             echo "won=true" >> "$GITHUB_OUTPUT"
           else
             echo "The gate label was already gone — the scheduled sweep claimed it. Standing down."

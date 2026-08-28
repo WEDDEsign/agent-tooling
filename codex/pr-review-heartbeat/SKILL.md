@@ -54,12 +54,14 @@ Each scheduled run should:
   the update terse. If the current head still has no Codex verdict about 30
   minutes after its activation boundary, pause and ask the user to invoke the
   repository's recovery trigger instead of polling indefinitely.
-- Classify every new submitted review and top-level conversation comment before
-  recording it as handled. For actionable feedback from either source, resume
-  the author loop in this same task: assess every finding, make agreed
-  mechanical fixes, verify them, push, and reply to each addressed thread with
-  the fix and commit SHA. Follow the repository's own author-side review rules
-  for round caps and scope.
+- Classify every new submitted review, top-level conversation comment, and
+  reopened inline thread before recording it as handled. For a reopened thread,
+  re-evaluate its underlying feedback against the current head even when no new
+  comment was added. For actionable feedback from any source, resume the author
+  loop in this same task: assess every finding, make agreed mechanical fixes,
+  verify them, push, and reply to each addressed thread with the fix and commit
+  SHA. Follow the repository's own author-side review rules for round caps and
+  scope.
 - A non-approving Codex review with no top-level finding and no inline finding
   is a content-free pass, not approval. Record its review ID, then allow one
   exceptional retry on the same head even though that head was already
@@ -89,10 +91,11 @@ Each scheduled run should:
   with a finding, a finding needs an architectural or product decision, the
   loop oscillates, or the repository's hard stop is reached.
 
-Pause the scheduled task when Codex gives a repository-recognized final
-approval, the PR merges or closes, ownership is handed off, the user asks to
-stop, or a disagreement needs the user's decision. Report the terminal reason
-in this task. Never merge merely because the review loop approved the PR.
+Pause the scheduled task when any authenticated, current-head approval matches
+the repository's recognized final-approval rules, the PR merges or closes,
+ownership is handed off, the user asks to stop, or a disagreement needs the
+user's decision. Report the terminal reason in this task. Never merge merely
+because the review loop approved the PR.
 
 This is a polling bridge, not an event webhook: the desktop app and computer
 must remain running, and wake-up latency is bounded by the chosen interval.
