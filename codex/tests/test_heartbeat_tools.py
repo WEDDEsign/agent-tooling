@@ -2,6 +2,7 @@
 """Regression tests for the Codex PR-heartbeat assets."""
 
 import importlib.util
+import json
 from pathlib import Path
 import unittest
 
@@ -9,6 +10,7 @@ import unittest
 ROOT = Path(__file__).parents[2]
 SYNC_PATH = ROOT / "codex" / "sync-pr-review-heartbeat.py"
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "wake-on-codex-review.yml"
+LABELS_PATH = ROOT / "labels" / "labels.json"
 
 spec = importlib.util.spec_from_file_location("sync_pr_review_heartbeat", SYNC_PATH)
 sync_module = importlib.util.module_from_spec(spec)
@@ -49,6 +51,13 @@ class OwnershipGuardTests(unittest.TestCase):
             "!contains(github.event.pull_request.labels.*.name, 'codex-only')",
             workflow,
         )
+
+    def test_fallback_owner_label_is_seeded(self):
+        taxonomy = json.loads(LABELS_PATH.read_text(encoding="utf-8"))
+        labels = {label["name"]: label for label in taxonomy["labels"]}
+
+        self.assertIn("codex-only", labels)
+        self.assertEqual("10A37F", labels["codex-only"]["color"])
 
 
 if __name__ == "__main__":
