@@ -1,12 +1,13 @@
 # Per-repo wiring
 
-How each repo opts into the shared ceremony. Three independent layers — do them
+How each repo opts into the shared ceremony. Four independent layers — do them
 in this order; each works on its own.
 
 ```
 1. Labels          (gh, instant)          ── no secrets, no PR review needed
 2. Plugin          (.claude/settings.json) ── client-side; commit via PR
-3. Workflows       (caller YAML + PAT)     ── server-side; needs `workflow` scope + a PAT
+3. Codex heartbeat (AGENTS.md)             ── client-side; commit via PR
+4. Workflows       (caller YAML + PAT)     ── server-side; needs `workflow` scope + a PAT
 ```
 
 ## Layer 1 — Labels (do first, unblocks everything)
@@ -36,7 +37,27 @@ once, or drop `templates/settings.local-dogfood.json` at
 `.claude/settings.local.json`. Prove a real PR through the loop, then switch to
 the GitHub source and commit `settings.json`.
 
-## Layer 3 — Server-side workflows
+## Layer 3 — Codex-owned PR heartbeat (client-side)
+
+Codex-owned PRs intentionally suppress the Claude wake-up, so they need a
+positive route back to the Codex task that opened them. Sync the shared
+procedure into each repo's `AGENTS.md`:
+
+```sh
+python codex/sync-pr-review-heartbeat.py /path/to/repo/AGENTS.md
+```
+
+This adds or replaces only the marked heartbeat section. The procedure tells a
+Codex author to create a minute-based scheduled task inside the current chat,
+poll new review activity, continue the fix/review loop in that exact task, and
+pause on approval, merge/close, handoff, disagreement, or the round hard stop.
+It deliberately does not replace the Claude plugin or server-side workflows.
+
+The first rollout should be dogfooded on the PR that wires it. Keep the desktop
+app and computer running during the pilot; this path is polling, not a GitHub
+event trigger.
+
+## Layer 4 — Server-side workflows
 
 Copy the matching `templates/caller-workflows/*.caller.yml` into each repo's
 `.github/workflows/` (drop the `.caller` from the filename), fill in the

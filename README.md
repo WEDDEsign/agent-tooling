@@ -23,20 +23,24 @@ demos.** Every asset here is high-frequency ceremony, so it is shared-by-default
 
 ## The two planes
 
-Ceremony runs on two planes. You need both — neither covers the other's cases.
+Ceremony runs on two planes. The scheduled Codex path supplements the
+interactive client when Codex, rather than Claude, owns a PR.
 
 | Plane | Vehicle | Fires when | Covers |
 |---|---|---|---|
 | **Client-side (sync)** | The `ceremony` **plugin** — skills, commands, hooks | A human is in an interactive Claude Code session | Guidance the agent *follows* + guards it *cannot skip* locally |
+| **Client-side (scheduled)** | The Codex PR heartbeat synced into `AGENTS.md` | Codex owns a PR and its originating desktop task is available | Returns review rounds to that exact task without waking Claude |
 | **Server-side (async)** | **Reusable GitHub workflows** in `.github/workflows/` | No session is open — Codex finishes a review, CI turns green/red | Advancing the PR loop while nobody is watching |
 
-The plugin cannot advance a PR when no session is open; the workflows cannot
-scaffold a page or run an eval before push. Ship both.
+The plugin and heartbeat cannot advance a PR when their author session is
+unavailable; the workflows cannot scaffold a page or run an eval before push.
+Ship both planes.
 
 ## Layout
 
 ```
 agent-tooling/
+├── codex/                               # Codex-owned PR heartbeat + AGENTS sync
 ├── .claude-plugin/marketplace.json     # catalog (one marketplace, one+ plugins)
 ├── plugins/
 │   └── ceremony/                        # the shared client-side plugin
