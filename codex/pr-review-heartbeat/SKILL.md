@@ -22,10 +22,12 @@ Immediately after opening or adopting a Codex-owned PR:
 
 Each scheduled run should:
 
-- Query the PR state, current head SHA, required checks, submitted Codex
-  reviews, and all inline review threads. Treat the GitHub review database ID
-  as the delivery key and keep a handled-review ledger in this task so a later
-  poll cannot process the same review twice.
+- Query the PR state, mergeability, current head SHA, required checks,
+  submitted Codex reviews, top-level PR conversation comments, and all inline
+  review threads. Treat each review or comment database ID as the delivery key
+  and keep a handled-event ledger in this task so a later poll cannot process
+  the same event twice. Apply the repository's approval rules to top-level
+  comments as well as submitted reviews.
 - Compare the reviewed commit with the current PR head. If they differ, report
   the review as stale and confirm that each finding still applies before
   changing code.
@@ -39,6 +41,11 @@ Each scheduled run should:
   exactly once for that head, using the repository's bare review trigger. If
   checks fail, diagnose and fix failures caused by the PR before requesting
   another review.
+- Treat a merge conflict that prevents checks from starting, a cancelled or
+  timed-out required check, and a required status that remains missing as
+  recovery states rather than ordinary waiting. Follow the repository's
+  mechanical recovery procedure when authorized; otherwise pause and ask the
+  user. Do not poll a terminal or permanently blocked CI state forever.
 - Stop and ask the user instead of changing code when the author disagrees
   with a finding, a finding needs an architectural or product decision, the
   loop oscillates, or the repository's hard stop is reached.
