@@ -62,18 +62,27 @@ class OwnershipGuardTests(unittest.TestCase):
 
 
 class CiGreenClaimTests(unittest.TestCase):
-    def test_claim_rechecks_head_and_restores_gate_before_trigger(self):
+    def test_claim_rechecks_head_and_latest_checks_before_trigger(self):
         workflow = CI_GREEN_PATH.read_text(encoding="utf-8")
         claim = workflow.index("Claim the gate (remove awaiting-codex-reping)")
         delete = workflow.index("gh api -X DELETE", claim)
         reread = workflow.index(
             'after=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}"', delete
         )
-        restore = workflow.index('-f "labels[]=awaiting-codex-reping"', reread)
+        check_reread = workflow.index("have_after=$(gh api", reread)
+        latest_attempt = workflow.index(
+            "group_by(.name) | map(max_by(.id))", check_reread
+        )
+        restore = workflow.index(
+            'restore_and_stand_down "required checks are no longer green',
+            latest_attempt,
+        )
         trigger = workflow.index("Re-ping Codex (bare trigger, posted directly)", restore)
 
         self.assertLess(delete, reread)
-        self.assertLess(reread, restore)
+        self.assertLess(reread, check_reread)
+        self.assertLess(check_reread, latest_attempt)
+        self.assertLess(latest_attempt, restore)
         self.assertLess(restore, trigger)
 
 

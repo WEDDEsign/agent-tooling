@@ -100,13 +100,14 @@ jobs:
           # despite green CI. Same defect the sweep carries; same fix.
           have=$(gh api --paginate --slurp \
             "repos/${REPO}/commits/${HEAD_SHA}/check-runs?per_page=100" \
-            | jq -c '[.[].check_runs[] | {name, conclusion}]')
-          # For each required check NAME ($req), it is "missing" unless some
-          # check-run with that name concluded success. Bind $req so the inner
-          # `.name` comparison isn't shadowed by jq's `.` rebinding.
+            | jq -c '[.[].check_runs[] | {id, name, status, conclusion}]
+                     | group_by(.name) | map(max_by(.id))')
+          # For each required check NAME ($req), use only its latest attempt.
+          # An older success must not hide a pending or failed re-run.
           missing=$(printf '%s' "$REQUIRED_CHECKS" | jq -r --argjson have "$have" '
             .[] as $req
-            | select(($have | any(.name == $req and .conclusion == "success")) | not)
+            | select(($have | any(.name == $req and .status == "completed"
+                                  and .conclusion == "success")) | not)
             | $req')
           if [ -n "${missing}" ]; then
             echo "Not all required checks green for ${HEAD_SHA}. Still pending/failed:"
@@ -192,8 +193,21 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REQUIRED_CHECKS: ${{ inputs.required_checks }}
         run: |
           set -eu
+          restore_and_stand_down() {
+            why="$1"
+            if gh api -X POST "repos/${REPO}/issues/${PR_NUMBER}/labels" \
+              -f "labels[]=awaiting-codex-reping" >/dev/null 2>&1; then
+              echo "${why} after the gate was claimed — restored the gate and standing down."
+              echo "won=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::${why} after the gate was claimed, and the gate could not be restored. Re-apply awaiting-codex-reping by hand."
+            exit 1
+          }
+
           if gh api -X DELETE \
             "repos/${REPO}/issues/${PR_NUMBER}/labels/awaiting-codex-reping" \
             >/dev/null 2>&1; then
@@ -215,14 +229,27 @@ jobs:
               else
                 why="mergeability became ${state_now}"
               fi
-              if gh api -X POST "repos/${REPO}/issues/${PR_NUMBER}/labels" \
-                -f "labels[]=awaiting-codex-reping" >/dev/null 2>&1; then
-                echo "${why} after the gate was claimed — restored the gate and standing down."
-                echo "won=false" >> "$GITHUB_OUTPUT"
-                exit 0
-              fi
-              echo "::error::${why} after the gate was claimed, and the gate could not be restored. Re-apply awaiting-codex-reping by hand."
-              exit 1
+              restore_and_stand_down "${why}"
+            fi
+
+            # Required checks can be rerun after the pre-claim read. Re-read
+            # their latest attempts after winning the claim so a pending or
+            # failed rerun cannot consume the gate and trigger review.
+            have_after=$(gh api --paginate --slurp \
+              "repos/${REPO}/commits/${HEAD_SHA}/check-runs?per_page=100" \
+              | jq -c '[.[].check_runs[] | {id, name, status, conclusion}]
+                       | group_by(.name) | map(max_by(.id))' || echo "")
+            if [ -z "${have_after}" ]; then
+              restore_and_stand_down "the post-claim required-check read failed"
+            fi
+            not_green=$(printf '%s' "$REQUIRED_CHECKS" \
+              | jq -r --argjson have "${have_after}" '
+                  .[] as $req
+                  | select(($have | any(.name == $req and .status == "completed"
+                                        and .conclusion == "success")) | not)
+                  | $req')
+            if [ -n "${not_green}" ]; then
+              restore_and_stand_down "required checks are no longer green: ${not_green}"
             fi
             echo "won=true" >> "$GITHUB_OUTPUT"
           else

@@ -23,28 +23,31 @@ Immediately after opening or adopting a Codex-owned PR:
    use the PR creation event. For every later head, use the database ID and
    creation time of the bare review-trigger comment posted for that exact head.
    When adopting an existing head that has neither boundary, first read and
-   ledger its existing events, then record the adoption check's time as that
-   head's fallback boundary. This boundary is what makes a later comment-based
-   approval attributable to the current head and starts the no-verdict timer;
-   never accept a pre-adoption comment against the fallback boundary.
+   classify its existing reviews, comments, and unresolved threads, process any
+   actionable feedback, and only then ledger those events. Record the adoption
+   check's time as that head's fallback boundary. This boundary makes a later
+   comment-based approval attributable to the current head and starts the
+   no-verdict timer; never accept a pre-adoption approval signal against it.
 
 Each scheduled run should:
 
 - Query the PR state, mergeability, current head SHA, required checks, all
-  submitted reviews, top-level PR conversation comments (including author,
-  association, and `updatedAt`), and all inline review threads and comments
-  (including each comment's `updatedAt`). Use a review's database ID as its
-  delivery key and a mutable comment's `(database ID, updatedAt)` pair as its
-  delivery key. Keep a handled-event ledger in this task so an unchanged event
-  cannot be processed twice while an edited comment is re-evaluated. Also keep
-  the last-seen resolution state for every thread: a resolved-to-unresolved
-  transition is new activity even when the thread contains no new comment ID.
+  submitted reviews (including `updatedAt`), top-level PR conversation
+  comments (including author, association, and `updatedAt`), and all inline
+  review threads and comments (including each comment's `updatedAt`). Use each
+  mutable review or comment's `(database ID, updatedAt)` pair as its delivery
+  key. Keep a handled-event ledger in this task so an unchanged event cannot be
+  processed twice while an edited event is re-evaluated. Also keep the last-seen
+  resolution state for every thread: a resolved-to-unresolved transition is new
+  activity even when the thread contains no new comment ID.
 - Apply the repository's approval rules only after authenticating the signal.
-  A submitted review supplies its reviewer identity. For a top-level approval
-  token, reject the PR author and require either an explicitly requested
-  reviewer or a repository role the repository recognizes as a reviewer (for
-  example `OWNER`, `MEMBER`, or `COLLABORATOR`). Accept Codex's fixed approval
-  template only from the configured Codex review bot identity.
+  A submitted review supplies its reviewer identity, but a token-bearing
+  submitted review still requires authorization: reject the PR author and
+  require either an explicitly requested reviewer or a non-author repository
+  role the repository recognizes as a reviewer (for example `OWNER`, `MEMBER`,
+  or `COLLABORATOR`). Apply the same authorization to a top-level approval
+  token. Accept Codex's fixed approval template only from the configured Codex
+  review bot identity.
 - Compare the reviewed commit with the current PR head. If they differ, report
   the review as stale and confirm that each finding still applies before
   changing code. Never treat an approval on an older commit as terminal. A
@@ -59,9 +62,10 @@ Each scheduled run should:
   the update terse. If the current head still has no Codex verdict about 30
   minutes after its activation boundary, pause and ask the user to invoke the
   repository's recovery trigger instead of polling indefinitely.
-- Classify every new submitted review, new or edited top-level conversation
-  comment, new or edited inline thread comment, and reopened inline thread
-  before recording it as handled. For a reopened thread, re-evaluate its
+- Classify every new or edited submitted review, every new or edited top-level
+  conversation comment, every new or edited inline thread comment, and every
+  reopened inline thread before recording it as handled. For a reopened thread,
+  re-evaluate its
   underlying feedback against the current head even when no new comment was
   added. For actionable feedback from any source, resume the author loop in
   this same task: assess every finding, make agreed mechanical fixes, verify
@@ -82,6 +86,10 @@ Each scheduled run should:
   a mixed comment enters Codex action mode. Absent means round zero; remove the
   previous label, create/apply `codex-round-{N+1}` exactly once for the handled
   review, and do not request another review when the counter is already 25.
+  In a gated repository, immediately after every push re-read the new head,
+  gate label, and workflow-produced trigger. If the gate was claimed for the
+  previous head and no trigger was issued for the new head, restore
+  `awaiting-codex-reping` before waiting for the new checks.
   Immediately before either transport claims the request, re-read both the head
   and the latest required-check states and abort if either changed. Record the
   resulting trigger comment ID and creation time as this head's activation
@@ -99,7 +107,10 @@ Each scheduled run should:
 Pause the scheduled task when any authenticated, current-head approval matches
 the repository's recognized final-approval rules, the PR merges or closes,
 ownership is handed off, the user asks to stop, or a disagreement needs the
-user's decision. Report the terminal reason in this task. Never merge merely
+user's decision. Before pausing a still-open Codex-owned PR, disarm any
+`awaiting-codex-reping` gate so CI cannot start another round after the stop.
+Re-read trigger comments around that removal and report when a trigger may
+already be inbound. Report the terminal reason in this task. Never merge merely
 because the review loop approved the PR.
 
 This is a polling bridge, not an event webhook: the desktop app and computer
