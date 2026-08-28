@@ -27,12 +27,19 @@ Immediately after opening or adopting a Codex-owned PR:
 
 Each scheduled run should:
 
-- Query the PR state, mergeability, current head SHA, required checks,
-  submitted Codex reviews, top-level PR conversation comments, and all inline
-  review threads. Treat each review or comment database ID as the delivery key
-  and keep a handled-event ledger in this task so a later poll cannot process
-  the same event twice. Apply the repository's approval rules to top-level
-  comments as well as submitted reviews.
+- Query the PR state, mergeability, current head SHA, required checks, all
+  submitted reviews, top-level PR conversation comments (including author and
+  association), and all inline review threads. Treat each review or comment
+  database ID as the delivery key and keep a handled-event ledger in this task
+  so a later poll cannot process the same event twice. Also keep the last-seen
+  resolution state for every thread: a resolved-to-unresolved transition is
+  new activity even when the thread contains no new comment ID.
+- Apply the repository's approval rules only after authenticating the signal.
+  A submitted review supplies its reviewer identity. For a top-level approval
+  token, reject the PR author and require either an explicitly requested
+  reviewer or a repository role the repository recognizes as a reviewer (for
+  example `OWNER`, `MEMBER`, or `COLLABORATOR`). Accept Codex's fixed approval
+  template only from the configured Codex review bot identity.
 - Compare the reviewed commit with the current PR head. If they differ, report
   the review as stale and confirm that each finding still applies before
   changing code. Never treat an approval on an older commit as terminal. A
@@ -44,27 +51,35 @@ Each scheduled run should:
   is not an activation boundary because a locally old commit can be pushed
   after the comment.
 - If there is no new activity, make no repository or GitHub changes and keep
-  the update terse.
-- For a new actionable review, resume the author loop in this same task:
-  assess every finding, make agreed mechanical fixes, verify them, push, and
-  reply to each addressed thread with the fix and commit SHA. Follow the
-  repository's own author-side review rules for round caps and scope.
+  the update terse. If the current head still has no Codex verdict about 30
+  minutes after its activation boundary, pause and ask the user to invoke the
+  repository's recovery trigger instead of polling indefinitely.
+- Classify every new submitted review and top-level conversation comment before
+  recording it as handled. For actionable feedback from either source, resume
+  the author loop in this same task: assess every finding, make agreed
+  mechanical fixes, verify them, push, and reply to each addressed thread with
+  the fix and commit SHA. Follow the repository's own author-side review rules
+  for round caps and scope.
 - A non-approving Codex review with no top-level finding and no inline finding
   is a content-free pass, not approval. Record its review ID, then allow one
   exceptional retry on the same head even though that head was already
   requested. Track the retry separately from ordinary requested-head state.
   If the retry is also content-free, pause and ask the user instead of polling
   forever.
-- After a fix head's required checks are green, request the next Codex review
-  exactly once for that head (apart from the single content-free retry), using
-  the repository's bare review trigger. Before posting, advance the durable
-  `codex-round-N` PR label exactly once for the handled review: absent means
-  zero; remove the previous label, create/apply `codex-round-{N+1}`, and do not
-  request another review when the counter is already 25. Immediately before
-  posting, re-read both the head and the latest required check states; abort
-  the request if either changed. Record the trigger comment ID and creation
-  time as this head's activation boundary. If checks fail, diagnose and fix
-  failures caused by the PR before requesting another review.
+- Use exactly one repository-configured transport for the next Codex review.
+  In a repository with an `awaiting-codex-reping` CI gate, advance the durable
+  `codex-round-N` label and arm that gate before pushing the fix, then let the
+  green-CI workflow post the bare trigger. In a repository without that gate,
+  advance the round after the fix head is green and let the originating task
+  post the exact bare trigger itself; never embed the trigger in prose, because
+  a mixed comment enters Codex action mode. Absent means round zero; remove the
+  previous label, create/apply `codex-round-{N+1}` exactly once for the handled
+  review, and do not request another review when the counter is already 25.
+  Immediately before either transport claims the request, re-read both the head
+  and the latest required-check states and abort if either changed. Record the
+  resulting trigger comment ID and creation time as this head's activation
+  boundary. Apart from the single content-free retry, request exactly once per
+  head. If checks fail, diagnose and fix failures caused by the PR first.
 - Treat a merge conflict that prevents checks from starting, a cancelled or
   timed-out required check, and a required status that remains missing as
   recovery states rather than ordinary waiting. Follow the repository's
