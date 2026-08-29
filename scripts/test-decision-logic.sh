@@ -27,6 +27,8 @@ DRIFT_LOG=$(mktemp)
 trap 'rm -f "$DRIFT_LOG"' EXIT
 SWEEP=.github/workflows/sweep-stalled-repings.yml
 GREEN=.github/workflows/wake-on-ci-green.yml
+RED=.github/workflows/wake-on-ci-red.yml
+REVIEW=.github/workflows/wake-on-codex-review.yml
 THREADS=.github/workflows/sweep-unresolved-threads.yml
 
 chk() { # name, got, want
@@ -516,6 +518,14 @@ chk "sweep claims the gate by DELETE before posting" \
   "$(grep -c 'X DELETE .*labels/\${LABEL}' "$SWEEP")" "2"
 chk "ci-green claims the gate before posting" \
   "$(awk '/Claim the gate/{c=NR} /Re-ping Codex/{p=NR} END{print (c>0 && p>c) ? "yes" : "no"}' "$GREEN")" "yes"
+chk "ci-green rechecks draft status before hard-stop mutation" \
+  "$(grep -c 'became draft before hard-stop escalation' "$GREEN")" "1"
+chk "ci-red rechecks draft status before hard-stop mutation" \
+  "$(grep -c 'became draft before hard-stop escalation' "$RED")" "1"
+chk "review wake-up rechecks draft status before hard-stop mutation" \
+  "$(grep -c 'became draft before hard-stop escalation' "$REVIEW")" "1"
+chk "scheduled sweep rechecks draft status before hard-stop mutation" \
+  "$(grep -c 'hardstop_draft=' "$SWEEP")" "1"
 
 # Drift is counted here rather than in `filter`, for the subshell reason above.
 fail=$((fail + $(grep -c . "$DRIFT_LOG" 2>/dev/null || true)))

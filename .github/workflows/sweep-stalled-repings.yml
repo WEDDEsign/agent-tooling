@@ -323,6 +323,16 @@ jobs:
             round=$(gh api --paginate --slurp "repos/${REPO}/issues/${pr}/labels?per_page=100" \
               | jq -r '[.[][] | .name | capture("^codex-round-(?<n>[0-9]+)$") | .n | tonumber] | max // 0')
             if [ "${round}" -ge 25 ]; then
+              hardstop_draft=$(gh api "repos/${REPO}/pulls/${pr}" --jq '.draft' || echo "")
+              if [ "${hardstop_draft}" != "false" ]; then
+                if [ "${hardstop_draft}" = "true" ]; then
+                  note "| #${pr} | ⏸️ became draft before hard-stop escalation — no mutation |"
+                else
+                  had_fatal=1
+                  note "| #${pr} | 🚨 hard-stop draft re-check failed — no mutation; retry next sweep |"
+                fi
+                continue
+              fi
               # Keyed on the escalation COMMENT, not on the `loop-stuck` label. Keying
               # on the label meant a run that added the label and then failed to comment
               # left every later sweep taking the "already escalated" branch, so the
