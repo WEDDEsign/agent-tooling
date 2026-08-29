@@ -11,6 +11,7 @@ ROOT = Path(__file__).parents[2]
 SYNC_PATH = ROOT / "codex" / "sync-pr-review-heartbeat.py"
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "wake-on-codex-review.yml"
 CI_GREEN_PATH = ROOT / ".github" / "workflows" / "wake-on-ci-green.yml"
+SWEEP_PATH = ROOT / ".github" / "workflows" / "sweep-stalled-repings.yml"
 LABELS_PATH = ROOT / "labels" / "labels.json"
 
 spec = importlib.util.spec_from_file_location("sync_pr_review_heartbeat", SYNC_PATH)
@@ -84,6 +85,28 @@ class CiGreenClaimTests(unittest.TestCase):
         self.assertLess(check_reread, latest_attempt)
         self.assertLess(latest_attempt, restore)
         self.assertLess(restore, trigger)
+
+    def test_event_claim_rejects_terminal_pr_before_trigger(self):
+        workflow = CI_GREEN_PATH.read_text(encoding="utf-8")
+        claim = workflow.index("Claim the gate (remove awaiting-codex-reping)")
+        terminal = workflow.index('pr_state}" != "open"', claim)
+        trigger = workflow.index("Re-ping Codex (bare trigger, posted directly)", terminal)
+
+        self.assertLess(terminal, trigger)
+
+    def test_sweep_claim_rechecks_terminal_state_and_latest_checks(self):
+        workflow = SWEEP_PATH.read_text(encoding="utf-8")
+        claim = workflow.index("# Claim the gate.")
+        terminal = workflow.index('pr_state}" != "open"', claim)
+        check_reread = workflow.index("runs_after=$(gh api", terminal)
+        latest_attempt = workflow.index(
+            "group_by(.name) | map(max_by(.id))", check_reread
+        )
+        trigger = workflow.index('gh pr comment "${pr}"', latest_attempt)
+
+        self.assertLess(terminal, check_reread)
+        self.assertLess(check_reread, latest_attempt)
+        self.assertLess(latest_attempt, trigger)
 
 
 if __name__ == "__main__":

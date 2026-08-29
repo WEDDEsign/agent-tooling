@@ -372,10 +372,12 @@ jobs:
             # parked forever despite green CI — a silent permanent skip, which is the
             # one failure a recovery net must not have.
             runs=$(gh api --paginate --slurp "repos/${REPO}/commits/${head_sha}/check-runs?per_page=100" \
-              | jq -c '[.[].check_runs[] | {name, conclusion}]')
+              | jq -c '[.[].check_runs[] | {id, name, status, conclusion}]
+                       | group_by(.name) | map(max_by(.id))')
             missing=$(printf '%s' "${REQUIRED_CHECKS}" | jq -r --argjson have "${runs}" '
               .[] as $req
-              | select(($have | any(.name == $req and .conclusion == "success")) | not)
+              | select(($have | any(.name == $req and .status == "completed"
+                                    and .conclusion == "success")) | not)
               | $req')
 
             if [ -n "${missing}" ]; then
@@ -418,16 +420,60 @@ jobs:
             # can no longer run, consuming the gate. `unknown` counts as changed here for
             # the same reason it does before the claim — it means "ask again", and the
             # gate is already claimed, so guessing is the expensive direction.
-            after=$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha + " " + .mergeable_state' || echo "")
-            head_now="${after%% *}"; state_now="${after##* }"
-            if [ -n "${after}" ] && { [ "${head_now}" != "${head_sha}" ] || [ "${state_now}" = "dirty" ] || [ "${state_now}" = "unknown" ]; }; then
-              if [ "${head_now}" != "${head_sha}" ]; then why="head moved to \`${head_now:0:10}\`"; else why="mergeability became \`${state_now}\`"; fi
+            after=$(gh api "repos/${REPO}/pulls/${pr}" \
+              --jq '[.state, (.merged | tostring), .head.sha, .mergeable_state] | @tsv' || echo "")
+            pr_state=$(printf '%s' "${after}" | cut -f1)
+            merged_now=$(printf '%s' "${after}" | cut -f2)
+            head_now=$(printf '%s' "${after}" | cut -f3)
+            state_now=$(printf '%s' "${after}" | cut -f4)
+            if [ -n "${after}" ] && { [ "${pr_state}" != "open" ] || [ "${merged_now}" = "true" ]; }; then
+              note "| #${pr} | 🛑 PR became terminal mid-claim — gate consumed, no trigger |"
+              continue
+            fi
+            if [ -z "${after}" ] || [ "${head_now}" != "${head_sha}" ] || [ "${state_now}" = "dirty" ] || [ "${state_now}" = "unknown" ]; then
+              if [ -z "${after}" ]; then
+                why="post-claim PR read failed"
+              elif [ "${head_now}" != "${head_sha}" ]; then
+                why="head moved to \`${head_now:0:10}\`"
+              else
+                why="mergeability became \`${state_now}\`"
+              fi
               if gh api -X POST "repos/${REPO}/issues/${pr}/labels" -f "labels[]=${LABEL}" >/dev/null 2>&1; then
                 note "| #${pr} | ↩️ ${why} mid-claim — gate restored, next sweep re-evaluates |"
               else
                 had_fatal=1
                 note "| #${pr} | 🚨 **GATE LOST** — ${why} mid-claim and the gate could not be restored. Re-apply \`${LABEL}\` by hand. |"
                 echo "::error::#${pr} lost its gate mid-claim (${why}) and it could not be restored."
+              fi
+              continue
+            fi
+
+            # A rerun can start after the pre-claim green read. Recheck each
+            # required check's latest attempt after winning the claim.
+            runs_after=$(gh api --paginate --slurp \
+              "repos/${REPO}/commits/${head_sha}/check-runs?per_page=100" \
+              | jq -c '[.[].check_runs[] | {id, name, status, conclusion}]
+                       | group_by(.name) | map(max_by(.id))' || echo "")
+            not_green=""
+            if [ -n "${runs_after}" ]; then
+              not_green=$(printf '%s' "${REQUIRED_CHECKS}" | jq -r --argjson have "${runs_after}" '
+                .[] as $req
+                | select(($have | any(.name == $req and .status == "completed"
+                                      and .conclusion == "success")) | not)
+                | $req')
+            fi
+            if [ -z "${runs_after}" ] || [ -n "${not_green}" ]; then
+              if [ -z "${runs_after}" ]; then
+                why="post-claim required-check read failed"
+              else
+                why="required checks are no longer green"
+              fi
+              if gh api -X POST "repos/${REPO}/issues/${pr}/labels" -f "labels[]=${LABEL}" >/dev/null 2>&1; then
+                note "| #${pr} | ↩️ ${why} — gate restored, next sweep re-evaluates |"
+              else
+                had_fatal=1
+                note "| #${pr} | 🚨 **GATE LOST** — ${why} and the gate could not be restored. Re-apply \`${LABEL}\` by hand. |"
+                echo "::error::#${pr} lost its gate after the post-claim check read and it could not be restored."
               fi
               continue
             fi

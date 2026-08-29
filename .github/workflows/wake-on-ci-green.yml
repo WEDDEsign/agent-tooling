@@ -217,9 +217,16 @@ jobs:
             # the scheduled sweep's handling of a head move or newly dirty /
             # still-unknown mergeability.
             after=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
-              --jq '.head.sha + " " + .mergeable_state' || echo "")
-            head_now="${after%% *}"
-            state_now="${after##* }"
+              --jq '[.state, (.merged | tostring), .head.sha, .mergeable_state] | @tsv' || echo "")
+            pr_state=$(printf '%s' "${after}" | cut -f1)
+            merged_now=$(printf '%s' "${after}" | cut -f2)
+            head_now=$(printf '%s' "${after}" | cut -f3)
+            state_now=$(printf '%s' "${after}" | cut -f4)
+            if [ -n "${after}" ] && { [ "${pr_state}" != "open" ] || [ "${merged_now}" = "true" ]; }; then
+              echo "PR #${PR_NUMBER} became terminal after the gate was claimed — leaving the gate consumed and standing down."
+              echo "won=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
             if [ -z "${after}" ] || [ "${head_now}" != "${HEAD_SHA}" ] || \
                [ "${state_now}" = "dirty" ] || [ "${state_now}" = "unknown" ]; then
               if [ -z "${after}" ]; then
