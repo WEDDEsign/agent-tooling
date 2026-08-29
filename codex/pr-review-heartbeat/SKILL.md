@@ -133,11 +133,13 @@ user's decision. Before pausing a still-open Codex-owned PR:
   handoff grants no authority to implement its findings, push, reply, advance
   the round, or re-arm a review transport; leave actionable findings for the
   user or new owner.
-- For every handoff to Claude, post a fresh `@Claude` comment before pausing.
-  On a non-`codex/*` branch, remove `codex-only` first; label removal alone does
-  not wake Claude, while a `codex/*` branch still needs the explicit comment
-  because automatic review wake-ups skip it. Do not report the handoff complete
-  until the applicable label removal and the comment both succeed.
+- For a handoff to Claude, establish the replacement author through a transport
+  the repository permits before pausing. On a non-`codex/*` branch, remove
+  `codex-only` and post a fresh `@Claude` comment; label removal alone does not
+  wake Claude. If the repository deliberately makes PR-triggered Claude runs a
+  no-op on `codex/*`, a comment is not a handoff: open or transfer to a supported
+  Claude Remote session and confirm that it owns the PR. Do not report the
+  handoff complete until the replacement owner is active.
 
 Report the terminal reason in this task. Never merge merely because the review
 loop approved the PR.
