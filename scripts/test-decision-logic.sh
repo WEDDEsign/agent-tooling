@@ -69,29 +69,35 @@ HANDLE="@""codex"; TRIGGER="${HANDLE} review"
 
 # ---------------------------------------------------------------------------
 section "Required checks — every name must be green for the head"
-RUNS_F=$(filter "$SWEEP" '[.[].check_runs[] | {name, conclusion}]')
+RUNS_F=$(filter "$SWEEP" '[.[].check_runs[] | {id, name, status, conclusion}]
+                       | group_by(.name) | map(max_by(.id))')
 MISS_F='.[] as $req
-      | select(($have | any(.name == $req and .conclusion == "success")) | not)
+      | select(($have | any(.name == $req and .status == "completed"
+                            and .conclusion == "success")) | not)
       | $req'
 runs() { printf '%s' "$1" | jq -c "$RUNS_F"; }
 missing() { printf '%s' "$2" | jq -r --argjson have "$(runs "$1")" "$MISS_F"; }
 
-ALL_GREEN='[{"check_runs":[{"name":"a","conclusion":"success"},{"name":"b","conclusion":"success"}]}]'
+ALL_GREEN='[{"check_runs":[{"id":1,"name":"a","status":"completed","conclusion":"success"},{"id":2,"name":"b","status":"completed","conclusion":"success"}]}]'
 chk "all green -> nothing missing" "$(missing "$ALL_GREEN" '["a","b"]')" ""
 chk "a failing check is missing" \
-  "$(missing '[{"check_runs":[{"name":"a","conclusion":"failure"}]}]' '["a"]')" "a"
+  "$(missing '[{"check_runs":[{"id":1,"name":"a","status":"completed","conclusion":"failure"}]}]' '["a"]')" "a"
 chk "a still-running check is missing" \
-  "$(missing '[{"check_runs":[{"name":"a","conclusion":null}]}]' '["a"]')" "a"
+  "$(missing '[{"check_runs":[{"id":1,"name":"a","status":"in_progress","conclusion":null}]}]' '["a"]')" "a"
 chk "a check with no run at all is missing" "$(missing "$ALL_GREEN" '["c"]')" "c"
-# A re-run leaves the old failure in the list under the same name. Requiring
-# ANY success rather than ALL non-failure is what makes a re-run count as green.
+# A re-run leaves the old attempt in the list under the same name. Only the
+# highest check-run ID counts, so a stale success cannot hide a newer failure.
 chk "re-run: old failure + new success under one name -> green" \
-  "$(missing '[{"check_runs":[{"name":"a","conclusion":"failure"},{"name":"a","conclusion":"success"}]}]' '["a"]')" ""
+  "$(missing '[{"check_runs":[{"id":1,"name":"a","status":"completed","conclusion":"failure"},{"id":2,"name":"a","status":"completed","conclusion":"success"}]}]' '["a"]')" ""
+chk "re-run: old success + new failure under one name -> missing" \
+  "$(missing '[{"check_runs":[{"id":1,"name":"a","status":"completed","conclusion":"success"},{"id":2,"name":"a","status":"completed","conclusion":"failure"}]}]' '["a"]')" "a"
+chk "re-run: old success + new pending under one name -> missing" \
+  "$(missing '[{"check_runs":[{"id":1,"name":"a","status":"completed","conclusion":"success"},{"id":2,"name":"a","status":"in_progress","conclusion":null}]}]' '["a"]')" "a"
 chk "check name containing spaces and parens" \
-  "$(missing '[{"check_runs":[{"name":"Backend (pytest)","conclusion":"success"}]}]' '["Backend (pytest)"]')" ""
+  "$(missing '[{"check_runs":[{"id":1,"name":"Backend (pytest)","status":"completed","conclusion":"success"}]}]' '["Backend (pytest)"]')" ""
 # Pagination: a required check on a later page must not read as absent.
 chk "required check on page 2 is found" \
-  "$(missing '[{"check_runs":[{"name":"a","conclusion":"success"}]},{"check_runs":[{"name":"b","conclusion":"success"}]}]' '["a","b"]')" ""
+  "$(missing '[{"check_runs":[{"id":1,"name":"a","status":"completed","conclusion":"success"}]},{"check_runs":[{"id":2,"name":"b","status":"completed","conclusion":"success"}]}]' '["a","b"]')" ""
 
 section "Terminal non-failure checks — these wake nothing and must be reported"
 BLOCKED_F='.[] as $req
@@ -99,13 +105,13 @@ BLOCKED_F='.[] as $req
       | "\($req): \(.conclusion)"'
 blocked() { printf '%s' "$2" | jq -r --argjson have "$(runs "$1")" "$BLOCKED_F"; }
 chk "cancelled is reported" \
-  "$(blocked '[{"check_runs":[{"name":"a","conclusion":"cancelled"}]}]' '["a"]')" "a: cancelled"
+  "$(blocked '[{"check_runs":[{"id":1,"name":"a","status":"completed","conclusion":"cancelled"}]}]' '["a"]')" "a: cancelled"
 chk "timed_out is reported" \
-  "$(blocked '[{"check_runs":[{"name":"a","conclusion":"timed_out"}]}]' '["a"]')" "a: timed_out"
+  "$(blocked '[{"check_runs":[{"id":1,"name":"a","status":"completed","conclusion":"timed_out"}]}]' '["a"]')" "a: timed_out"
 chk "a plain failure is NOT reported as terminal-non-failure" \
-  "$(blocked '[{"check_runs":[{"name":"a","conclusion":"failure"}]}]' '["a"]')" ""
+  "$(blocked '[{"check_runs":[{"id":1,"name":"a","status":"completed","conclusion":"failure"}]}]' '["a"]')" ""
 chk "a running check is NOT reported as terminal-non-failure" \
-  "$(blocked '[{"check_runs":[{"name":"a","conclusion":null}]}]' '["a"]')" ""
+  "$(blocked '[{"check_runs":[{"id":1,"name":"a","status":"in_progress","conclusion":null}]}]' '["a"]')" ""
 
 # ---------------------------------------------------------------------------
 section "Round counter — the only bound on a runaway loop"
