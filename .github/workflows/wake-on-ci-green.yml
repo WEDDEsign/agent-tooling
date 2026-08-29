@@ -90,6 +90,13 @@ jobs:
             exit 0
           fi
 
+          is_draft=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.draft')
+          if [ "${is_draft}" = "true" ]; then
+            echo "PR #${PR_NUMBER} is draft — leaving the review gate armed and skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # workflow_run fires once per CI workflow; the others may still be
           # running. Verify EVERY required check-run name is success for this
           # SHA before waking Claude. required_checks is a JSON array, so names
@@ -217,15 +224,19 @@ jobs:
             # the scheduled sweep's handling of a head move or newly dirty /
             # still-unknown mergeability.
             after=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
-              --jq '[.state, (.merged | tostring), .head.sha, .mergeable_state] | @tsv' || echo "")
+              --jq '[.state, (.merged | tostring), .head.sha, .mergeable_state, (.draft | tostring)] | @tsv' || echo "")
             pr_state=$(printf '%s' "${after}" | cut -f1)
             merged_now=$(printf '%s' "${after}" | cut -f2)
             head_now=$(printf '%s' "${after}" | cut -f3)
             state_now=$(printf '%s' "${after}" | cut -f4)
+            draft_now=$(printf '%s' "${after}" | cut -f5)
             if [ -n "${after}" ] && { [ "${pr_state}" != "open" ] || [ "${merged_now}" = "true" ]; }; then
               echo "PR #${PR_NUMBER} became terminal after the gate was claimed — leaving the gate consumed and standing down."
               echo "won=false" >> "$GITHUB_OUTPUT"
               exit 0
+            fi
+            if [ "${draft_now}" = "true" ]; then
+              restore_and_stand_down "PR #${PR_NUMBER} became draft"
             fi
             if [ -z "${after}" ] || [ "${head_now}" != "${HEAD_SHA}" ] || \
                [ "${state_now}" = "dirty" ] || [ "${state_now}" = "unknown" ]; then

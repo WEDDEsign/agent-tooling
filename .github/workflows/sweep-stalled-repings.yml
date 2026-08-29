@@ -244,6 +244,12 @@ jobs:
             info=$(gh api "repos/${REPO}/pulls/${pr}")
             head_sha=$(printf '%s' "${info}" | jq -r '.head.sha')
             merge_state=$(printf '%s' "${info}" | jq -r '.mergeable_state')
+            is_draft=$(printf '%s' "${info}" | jq -r '.draft')
+
+            if [ "${is_draft}" = "true" ]; then
+              note "| #${pr} | 📝 draft — review transport suspended, gate left in place |"
+              continue
+            fi
 
             # Mergeability is checked BEFORE the green path, not inside it. Check
             # runs are recorded against the head SHA, so a base-branch update that
@@ -421,20 +427,23 @@ jobs:
             # the same reason it does before the claim — it means "ask again", and the
             # gate is already claimed, so guessing is the expensive direction.
             after=$(gh api "repos/${REPO}/pulls/${pr}" \
-              --jq '[.state, (.merged | tostring), .head.sha, .mergeable_state] | @tsv' || echo "")
+              --jq '[.state, (.merged | tostring), .head.sha, .mergeable_state, (.draft | tostring)] | @tsv' || echo "")
             pr_state=$(printf '%s' "${after}" | cut -f1)
             merged_now=$(printf '%s' "${after}" | cut -f2)
             head_now=$(printf '%s' "${after}" | cut -f3)
             state_now=$(printf '%s' "${after}" | cut -f4)
+            draft_now=$(printf '%s' "${after}" | cut -f5)
             if [ -n "${after}" ] && { [ "${pr_state}" != "open" ] || [ "${merged_now}" = "true" ]; }; then
               note "| #${pr} | 🛑 PR became terminal mid-claim — gate consumed, no trigger |"
               continue
             fi
-            if [ -z "${after}" ] || [ "${head_now}" != "${head_sha}" ] || [ "${state_now}" = "dirty" ] || [ "${state_now}" = "unknown" ]; then
+            if [ -z "${after}" ] || [ "${head_now}" != "${head_sha}" ] || [ "${state_now}" = "dirty" ] || [ "${state_now}" = "unknown" ] || [ "${draft_now}" = "true" ]; then
               if [ -z "${after}" ]; then
                 why="post-claim PR read failed"
               elif [ "${head_now}" != "${head_sha}" ]; then
                 why="head moved to \`${head_now:0:10}\`"
+              elif [ "${draft_now}" = "true" ]; then
+                why="PR became draft"
               else
                 why="mergeability became \`${state_now}\`"
               fi

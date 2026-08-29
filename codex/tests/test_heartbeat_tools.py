@@ -94,6 +94,18 @@ class CiGreenClaimTests(unittest.TestCase):
 
         self.assertLess(terminal, trigger)
 
+    def test_event_transport_rejects_drafts_before_and_after_claim(self):
+        workflow = CI_GREEN_PATH.read_text(encoding="utf-8")
+        gate = workflow.index("Check label and required-check status")
+        claim = workflow.index("Claim the gate (remove awaiting-codex-reping)")
+        trigger = workflow.index("Re-ping Codex (bare trigger, posted directly)")
+        pre_claim = workflow.index('is_draft=$(gh api', gate)
+        post_claim = workflow.index('draft_now=$(printf', claim)
+
+        self.assertLess(pre_claim, claim)
+        self.assertLess(claim, post_claim)
+        self.assertLess(post_claim, trigger)
+
     def test_sweep_claim_rechecks_terminal_state_and_latest_checks(self):
         workflow = SWEEP_PATH.read_text(encoding="utf-8")
         claim = workflow.index("# Claim the gate.")
@@ -107,6 +119,17 @@ class CiGreenClaimTests(unittest.TestCase):
         self.assertLess(terminal, check_reread)
         self.assertLess(check_reread, latest_attempt)
         self.assertLess(latest_attempt, trigger)
+
+    def test_sweep_rejects_drafts_before_and_after_claim(self):
+        workflow = SWEEP_PATH.read_text(encoding="utf-8")
+        initial_read = workflow.index('is_draft=$(printf')
+        claim = workflow.index("# Claim the gate.")
+        post_claim = workflow.index('draft_now=$(printf', claim)
+        trigger = workflow.index('gh pr comment "${pr}"', post_claim)
+
+        self.assertLess(initial_read, claim)
+        self.assertLess(claim, post_claim)
+        self.assertLess(post_claim, trigger)
 
 
 if __name__ == "__main__":

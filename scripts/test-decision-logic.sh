@@ -220,24 +220,26 @@ chk "reviews across pages (the branch-reset shape)" \
 
 # ---------------------------------------------------------------------------
 section "Mergeability — before the claim and again after it"
-merge_gate() { case "$1" in dirty|unknown) echo SKIP;; *) echo PROCEED;; esac; }
-for st in dirty unknown clean blocked behind draft; do
+merge_gate() { if [ "$2" = true ]; then echo SKIP; else case "$1" in dirty|unknown) echo SKIP;; *) echo PROCEED;; esac; fi; }
+for st in dirty unknown clean blocked behind; do
   case "$st" in dirty|unknown) w=SKIP;; *) w=PROCEED;; esac
-  chk "mergeable_state=$st -> $w" "$(merge_gate "$st")" "$w"
+  chk "mergeable_state=$st -> $w" "$(merge_gate "$st" false)" "$w"
 done
+chk "draft flag -> SKIP" "$(merge_gate clean true)" "SKIP"
 # `blocked` is the ordinary required-checks-and-review gate, not a conflict.
 # Treating it as one would park every PR merely awaiting review.
-post_claim() { # head_was, head_now, state_now
-  if [ -n "$2" ] && { [ "$2" != "$1" ] || [ "$3" = dirty ] || [ "$3" = unknown ]; }
+post_claim() { # head_was, head_now, state_now, draft_now
+  if [ -n "$2" ] && { [ "$2" != "$1" ] || [ "$3" = dirty ] || [ "$3" = unknown ] || [ "$4" = true ]; }
   then echo RESTORE; else echo PROCEED; fi
 }
-chk "post-claim: unchanged and clean -> proceed" "$(post_claim abc abc clean)" "PROCEED"
-chk "post-claim: head moved -> restore" "$(post_claim abc def clean)" "RESTORE"
-chk "post-claim: base advanced, head unchanged, now dirty -> restore" "$(post_claim abc abc dirty)" "RESTORE"
-chk "post-claim: became unknown -> restore" "$(post_claim abc abc unknown)" "RESTORE"
-chk "post-claim: blocked still proceeds" "$(post_claim abc abc blocked)" "PROCEED"
+chk "post-claim: unchanged and clean -> proceed" "$(post_claim abc abc clean false)" "PROCEED"
+chk "post-claim: head moved -> restore" "$(post_claim abc def clean false)" "RESTORE"
+chk "post-claim: base advanced, head unchanged, now dirty -> restore" "$(post_claim abc abc dirty false)" "RESTORE"
+chk "post-claim: became unknown -> restore" "$(post_claim abc abc unknown false)" "RESTORE"
+chk "post-claim: became draft -> restore" "$(post_claim abc abc clean true)" "RESTORE"
+chk "post-claim: blocked still proceeds" "$(post_claim abc abc blocked false)" "PROCEED"
 chk "post-claim: unreadable -> proceed (do not let a transient failure mute the sweep)" \
-  "$(post_claim abc '' '')" "PROCEED"
+  "$(post_claim abc '' '' false)" "PROCEED"
 after="abc123 dirty"
 chk "post-claim: sha/state field split, sha" "${after%% *}" "abc123"
 chk "post-claim: sha/state field split, state" "${after##* }" "dirty"

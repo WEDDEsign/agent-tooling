@@ -42,13 +42,17 @@ Each scheduled run should:
 - Query the PR state, mergeability, current head SHA, required checks, all
   submitted reviews (including `lastEditedAt`), top-level PR conversation
   comments (including author, association, and `updatedAt`), and all inline
-  review threads and comments (including each comment's `updatedAt`). Use each
-  review's `(database ID, lastEditedAt)` pair and each mutable comment's
-  `(database ID, updatedAt)` pair as its delivery key. Keep a handled-event
-  ledger in this task so an unchanged event cannot be processed twice while an
-  edited event is re-evaluated. Also keep the last-seen resolution state for
-  every thread: a resolved-to-unresolved transition is new activity even when
-  the thread contains no new comment ID.
+  review threads and comments (including each comment's `updatedAt`). Also
+  query the PR timeline's `ReviewRequestedEvent` history and preserve the
+  requested reviewer or team identities; an external reviewer's active request
+  disappears when they submit, including when request and submission happen
+  between polls. Use each review's `(database ID, lastEditedAt)` pair and each
+  mutable comment's `(database ID, updatedAt)` pair as its delivery key. Keep a
+  handled-event ledger and the historical requested-reviewer set in this task
+  so an unchanged event cannot be processed twice while an edited event is
+  re-evaluated. Also keep the last-seen resolution state for every thread: a
+  resolved-to-unresolved transition is new activity even when the thread
+  contains no new comment ID.
 - Apply the repository's approval rules only after authenticating the signal.
   A submitted review supplies its reviewer identity, but a token-bearing
   submitted review still requires authorization: reject the PR author and
@@ -120,15 +124,20 @@ user's decision. Before pausing a still-open Codex-owned PR:
 
 - Record the current round label, disarm any `awaiting-codex-reping` gate, and
   re-read trigger comments around that removal. If removal conclusively won the
-  claim race and no trigger exists for that cycle, restore the previous round
-  label because the incremented round never ran. If the outcome is uncertain
-  or a trigger landed, leave the counter unchanged and report that state.
+  claim race and no trigger exists for that cycle, remove the unused current
+  round label, then reapply the previous label only when its number is greater
+  than zero. If the outcome is uncertain or a trigger landed, leave the counter
+  unchanged and report that state.
 - If a trigger is already inbound, keep the scheduled task active for that one
-  final delivery. Classify and triage every event in that delivery, then pause
-  without advancing the round or re-arming a review transport.
-- For a handoff to Claude on a non-`codex/*` branch, remove `codex-only` and
-  post a fresh `@Claude` comment before pausing; label removal alone does not
-  wake Claude. Do not report the handoff complete until both actions succeed.
+  final delivery only to record, classify, and report its events. A stop or
+  handoff grants no authority to implement its findings, push, reply, advance
+  the round, or re-arm a review transport; leave actionable findings for the
+  user or new owner.
+- For every handoff to Claude, post a fresh `@Claude` comment before pausing.
+  On a non-`codex/*` branch, remove `codex-only` first; label removal alone does
+  not wake Claude, while a `codex/*` branch still needs the explicit comment
+  because automatic review wake-ups skip it. Do not report the handoff complete
+  until the applicable label removal and the comment both succeed.
 
 Report the terminal reason in this task. Never merge merely because the review
 loop approved the PR.
