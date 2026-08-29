@@ -100,7 +100,9 @@ Each scheduled run should:
   the gate for that new head before letting the green-CI workflow post the bare
   trigger. Immediately re-read the head, gate label, and workflow-produced
   triggers after arming; if the head moved, disarm the stale gate and restart
-  this sequence for the new head. In a repository without that gate, advance
+  this sequence for the new head. Record whether this gate activation advanced
+  the counter; some unreviewed pushes require a gate without representing a new
+  review round. In a repository without that gate, advance
   the round after the fix head is green and let the originating task post the
   exact bare trigger itself; never embed the trigger in prose, because a mixed
   comment enters Codex action mode. Absent means round zero; remove the previous
@@ -125,12 +127,14 @@ the repository's recognized final-approval rules, the PR merges or closes,
 ownership is handed off, the user asks to stop, or a disagreement needs the
 user's decision. Before pausing a still-open Codex-owned PR:
 
-- Record the current round label, disarm any `awaiting-codex-reping` gate, and
-  re-read trigger comments around that removal. If removal conclusively won the
-  claim race and no trigger exists for that cycle, remove the unused current
-  round label, then reapply the previous label only when its number is greater
-  than zero. If the outcome is uncertain or a trigger landed, leave the counter
-  unchanged and report that state.
+- Record the current round label and whether this gate activation advanced it,
+  disarm any `awaiting-codex-reping` gate, and re-read trigger comments around
+  that removal. If removal conclusively won the claim race, no trigger exists
+  for that cycle, and this activation advanced the counter, remove the unused
+  current round label, then reapply the previous label only when its number is
+  greater than zero. If this activation did not advance the counter, leave its
+  existing round label unchanged. If the outcome is uncertain or a trigger
+  landed, also leave the counter unchanged and report that state.
 - If a trigger is already inbound, keep the scheduled task active for that one
   final delivery only to record, classify, and report its events. A stop or
   handoff grants no authority to implement its findings, push, reply, advance
