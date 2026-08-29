@@ -12,16 +12,20 @@ task with its existing context; it does not create a replacement author task.
 
 Immediately after opening or adopting a Codex-owned PR:
 
-1. Preserve the repo's owner signal (`codex/*` branch or its equivalent
-   `codex-only` label) so Claude's review wake-up remains suppressed.
+1. Ensure the repo's owner signal exists so Claude's review wake-up remains
+   suppressed. A `codex/*` branch supplies it; for every other branch, add the
+   equivalent `codex-only` label before the first review. Adoption must
+   establish a missing signal, not merely preserve one that may not exist.
 2. Create a recurring task **inside the current chat**, normally every two
    minutes, named for the repository and PR number. Do not create a standalone
    scheduled task or a new Codex task.
 3. Give the scheduled task a durable prompt containing the repository, PR
    number, branch, required checks, and the stop conditions below.
-4. Record a head-activation boundary in this task. For the PR's initial head,
-   use the PR creation event. For every later head, use the database ID and
-   creation time of the bare review-trigger comment posted for that exact head.
+4. Record a head-activation boundary in this task. For an initially ready PR,
+   use the PR creation event. A draft has no active review boundary: when it
+   becomes ready, use its `ready_for_review` event. For every later head, use
+   the database ID and creation time of the bare review-trigger comment posted
+   for that exact head.
    When adopting an existing head that has neither boundary, first read and
    classify its existing reviews, comments, and unresolved threads, process any
    actionable feedback, and only then ledger those events. Record the adoption
@@ -31,6 +35,10 @@ Immediately after opening or adopting a Codex-owned PR:
 
 Each scheduled run should:
 
+- Treat a draft PR as an inactive review loop. Poll only enough state to notice
+  that it became ready; do not run the no-verdict timer, advance a round, arm a
+  gate, or request review while it is draft. On the ready transition, record
+  that event as the initial activation boundary and resume the normal loop.
 - Query the PR state, mergeability, current head SHA, required checks, all
   submitted reviews (including `lastEditedAt`), top-level PR conversation
   comments (including author, association, and `updatedAt`), and all inline
@@ -108,11 +116,22 @@ Each scheduled run should:
 Pause the scheduled task when any authenticated, current-head approval matches
 the repository's recognized final-approval rules, the PR merges or closes,
 ownership is handed off, the user asks to stop, or a disagreement needs the
-user's decision. Before pausing a still-open Codex-owned PR, disarm any
-`awaiting-codex-reping` gate so CI cannot start another round after the stop.
-Re-read trigger comments around that removal and report when a trigger may
-already be inbound. Report the terminal reason in this task. Never merge merely
-because the review loop approved the PR.
+user's decision. Before pausing a still-open Codex-owned PR:
+
+- Record the current round label, disarm any `awaiting-codex-reping` gate, and
+  re-read trigger comments around that removal. If removal conclusively won the
+  claim race and no trigger exists for that cycle, restore the previous round
+  label because the incremented round never ran. If the outcome is uncertain
+  or a trigger landed, leave the counter unchanged and report that state.
+- If a trigger is already inbound, keep the scheduled task active for that one
+  final delivery. Classify and triage every event in that delivery, then pause
+  without advancing the round or re-arming a review transport.
+- For a handoff to Claude on a non-`codex/*` branch, remove `codex-only` and
+  post a fresh `@Claude` comment before pausing; label removal alone does not
+  wake Claude. Do not report the handoff complete until both actions succeed.
+
+Report the terminal reason in this task. Never merge merely because the review
+loop approved the PR.
 
 This is a polling bridge, not an event webhook: the desktop app and computer
 must remain running, and wake-up latency is bounded by the chosen interval.
