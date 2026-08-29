@@ -164,20 +164,6 @@ jobs:
 
           The \`loop-stuck\` label has been added. To resume the autopilot remove that label and re-trigger Codex manually, or close the loop."
 
-      # Soft-warn (round >= 10) goes in its own comment addressed to the human —
-      # NEVER appended to the trigger, or it would flip Codex into action mode.
-      - name: Post soft-warn (separate comment)
-        if: steps.gate.outputs.skip != 'true' && steps.round.outputs.mode == 'softwarn'
-        env:
-          GH_TOKEN: ${{ secrets.CEREMONY_PAT }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
-          ROUND: ${{ steps.round.outputs.round }}
-          ESCALATION_HANDLE: ${{ inputs.escalation_handle }}
-        run: |
-          set -eu
-          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot is at **round ${ROUND}** on this PR. Re-pinging Codex automatically (next comment). If this loop is oscillating (round N's findings ≈ round N-2's), consider stepping in. Hard-stop at round 25."
-
       # The label removal comes BEFORE the post, and is the claim rather than
       # the cleanup. `sweep-stalled-repings` runs on a schedule and can evaluate
       # the same PR at the same moment; it is a different workflow, so no
@@ -274,6 +260,22 @@ jobs:
             echo "The gate label was already gone — the scheduled sweep claimed it. Standing down."
             echo "won=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # Soft-warn (round >= 10) goes in its own comment addressed to the human —
+      # NEVER appended to the trigger, or it would flip Codex into action mode.
+      # Post only after this run has won the claim and completed every reread;
+      # otherwise a losing transport promises a trigger it will not post.
+      - name: Post soft-warn (separate comment)
+        if: steps.claim.outputs.won == 'true' && steps.round.outputs.mode == 'softwarn'
+        env:
+          GH_TOKEN: ${{ secrets.CEREMONY_PAT }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          ROUND: ${{ steps.round.outputs.round }}
+          ESCALATION_HANDLE: ${{ inputs.escalation_handle }}
+        run: |
+          set -eu
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot is at **round ${ROUND}** on this PR. Re-pinging Codex automatically (next comment). If this loop is oscillating (round N's findings ≈ round N-2's), consider stepping in. Hard-stop at round 25."
 
       - name: Re-ping Codex (bare trigger, posted directly)
         if: steps.claim.outputs.won == 'true'

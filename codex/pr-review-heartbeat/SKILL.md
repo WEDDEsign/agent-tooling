@@ -43,14 +43,15 @@ Each scheduled run should:
   submitted reviews (including `lastEditedAt`), top-level PR conversation
   comments (including author, association, and `updatedAt`), and all inline
   review threads and comments (including each comment's `updatedAt`). Also
-  query the PR timeline's `ReviewRequestedEvent` history and preserve the
-  requested reviewer or team identities; an external reviewer's active request
-  disappears when they submit, including when request and submission happen
-  between polls. Use each review's `(database ID, lastEditedAt)` pair and each
-  mutable comment's `(database ID, updatedAt)` pair as its delivery key. Keep a
-  handled-event ledger and the historical requested-reviewer set in this task
-  so an unchanged event cannot be processed twice while an edited event is
-  re-evaluated. Also keep the last-seen resolution state for every thread: a
+  query the PR timeline's `ReviewRequestedEvent` and
+  `ReviewRequestRemovedEvent` history. Apply those events chronologically to
+  preserve requests that disappeared because the reviewer submitted while
+  expiring identities that were explicitly unrequested. Use each review's
+  `(database ID, lastEditedAt)` pair and each mutable comment's `(database ID,
+  updatedAt)` pair as its delivery key. Keep a handled-event ledger and the
+  resulting requested-reviewer state in this task so an unchanged event cannot
+  be processed twice while an edited event is re-evaluated. Also keep the
+  last-seen resolution state for every thread: a
   resolved-to-unresolved transition is new activity even when the thread
   contains no new comment ID.
 - Apply the repository's approval rules only after authenticating the signal.

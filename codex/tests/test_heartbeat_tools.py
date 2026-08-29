@@ -11,6 +11,7 @@ ROOT = Path(__file__).parents[2]
 SYNC_PATH = ROOT / "codex" / "sync-pr-review-heartbeat.py"
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "wake-on-codex-review.yml"
 CI_GREEN_PATH = ROOT / ".github" / "workflows" / "wake-on-ci-green.yml"
+CI_RED_PATH = ROOT / ".github" / "workflows" / "wake-on-ci-red.yml"
 SWEEP_PATH = ROOT / ".github" / "workflows" / "sweep-stalled-repings.yml"
 LABELS_PATH = ROOT / "labels" / "labels.json"
 
@@ -105,6 +106,26 @@ class CiGreenClaimTests(unittest.TestCase):
         self.assertLess(pre_claim, claim)
         self.assertLess(claim, post_claim)
         self.assertLess(post_claim, trigger)
+
+    def test_event_transport_warns_only_after_winning_claim(self):
+        workflow = CI_GREEN_PATH.read_text(encoding="utf-8")
+        claim = workflow.index("Claim the gate (remove awaiting-codex-reping)")
+        warning = workflow.index("Post soft-warn (separate comment)")
+        trigger = workflow.index("Re-ping Codex (bare trigger, posted directly)")
+
+        self.assertLess(claim, warning)
+        self.assertLess(warning, trigger)
+        self.assertIn("steps.claim.outputs.won == 'true'", workflow[warning:trigger])
+
+    def test_ci_red_transport_rejects_drafts_before_wake_up(self):
+        workflow = CI_RED_PATH.read_text(encoding="utf-8")
+        gate = workflow.index("Check awaiting-codex-reping label")
+        wake = workflow.index("Post @Claude wake-up comment")
+        initial_read = workflow.index('is_draft=$(gh api', gate)
+        final_read = workflow.index('is_draft=$(gh api', wake)
+
+        self.assertLess(initial_read, wake)
+        self.assertGreater(final_read, wake)
 
     def test_sweep_claim_rechecks_terminal_state_and_latest_checks(self):
         workflow = SWEEP_PATH.read_text(encoding="utf-8")
