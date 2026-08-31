@@ -30,7 +30,33 @@ permissions:
 
 jobs:
   resolve:
-    if: github.event.comment.in_reply_to_id != null
+    # A reply from someone outside the allowed set cannot resolve anything, and
+    # every input that decides that is already in the event payload. Deciding it
+    # here means no runner is allocated for those replies at all. The same
+    # question asked one step later allocates a machine, reads three env vars,
+    # skips, and still bills the whole minute GitHub rounds every job up to —
+    # and on a busy PR most review replies come from reviewers, not the author
+    # side, so that was the common path.
+    #
+    # DELIBERATELY MORE PERMISSIVE THAN THE STEP BELOW, which stays the exact
+    # authority. GitHub's expression language has no `replace()`, so this cannot
+    # trim whitespace around the entries of a comma-separated
+    # `extra_identities`; an anchored `,login,` test would therefore reject
+    # `'WEDDEsign, Foo'` — a spelling the input's own description permits and
+    # the step accepts. A bare `contains` over the raw string can only ever
+    # admit MORE logins than the step does, never fewer, so the failure
+    # direction is a wasted minute rather than a thread left silently
+    # unresolved. The step's exact-match loop then decides.
+    #
+    # Nothing here changes WHICH replies resolve a thread. That set has to stay
+    # identical to the one `sweep-unresolved-threads` treats as author-side —
+    # see the note in scripts/test-decision-logic.sh — and it does, because the
+    # step that determines it is untouched.
+    if: >-
+      github.event.comment.in_reply_to_id != null && (
+      github.event.comment.user.login == github.event.pull_request.user.login ||
+      github.event.comment.user.login == 'claude[bot]' ||
+      contains(inputs.extra_identities, github.event.comment.user.login) )
     runs-on: ubuntu-latest
     steps:
       - name: Check replier is allowed
