@@ -103,6 +103,11 @@ jobs:
           ESCALATION_HANDLE: ${{ inputs.escalation_handle }}
         run: |
           set -eu
+          is_draft=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.draft')
+          if [ "${is_draft}" = "true" ]; then
+            echo "PR #${PR_NUMBER} became draft before hard-stop escalation — standing down."
+            exit 0
+          fi
           gh label create loop-stuck \
             --color B60205 \
             --description "Codex review autopilot exceeded round 25 — human intervention required" \

@@ -27,6 +27,8 @@ DRIFT_LOG=$(mktemp)
 trap 'rm -f "$DRIFT_LOG"' EXIT
 SWEEP=.github/workflows/sweep-stalled-repings.yml
 GREEN=.github/workflows/wake-on-ci-green.yml
+RED=.github/workflows/wake-on-ci-red.yml
+REVIEW=.github/workflows/wake-on-codex-review.yml
 THREADS=.github/workflows/sweep-unresolved-threads.yml
 
 chk() { # name, got, want
@@ -69,29 +71,35 @@ HANDLE="@""codex"; TRIGGER="${HANDLE} review"
 
 # ---------------------------------------------------------------------------
 section "Required checks — every name must be green for the head"
-RUNS_F=$(filter "$SWEEP" '[.[].check_runs[] | {name, conclusion}]')
+RUNS_F=$(filter "$SWEEP" '[.[].check_runs[] | {id, name, status, conclusion}]
+                       | group_by(.name) | map(max_by(.id))')
 MISS_F='.[] as $req
-      | select(($have | any(.name == $req and .conclusion == "success")) | not)
+      | select(($have | any(.name == $req and .status == "completed"
+                            and .conclusion == "success")) | not)
       | $req'
 runs() { printf '%s' "$1" | jq -c "$RUNS_F"; }
 missing() { printf '%s' "$2" | jq -r --argjson have "$(runs "$1")" "$MISS_F"; }
 
-ALL_GREEN='[{"check_runs":[{"name":"a","conclusion":"success"},{"name":"b","conclusion":"success"}]}]'
+ALL_GREEN='[{"check_runs":[{"id":1,"name":"a","status":"completed","conclusion":"success"},{"id":2,"name":"b","status":"completed","conclusion":"success"}]}]'
 chk "all green -> nothing missing" "$(missing "$ALL_GREEN" '["a","b"]')" ""
 chk "a failing check is missing" \
-  "$(missing '[{"check_runs":[{"name":"a","conclusion":"failure"}]}]' '["a"]')" "a"
+  "$(missing '[{"check_runs":[{"id":1,"name":"a","status":"completed","conclusion":"failure"}]}]' '["a"]')" "a"
 chk "a still-running check is missing" \
-  "$(missing '[{"check_runs":[{"name":"a","conclusion":null}]}]' '["a"]')" "a"
+  "$(missing '[{"check_runs":[{"id":1,"name":"a","status":"in_progress","conclusion":null}]}]' '["a"]')" "a"
 chk "a check with no run at all is missing" "$(missing "$ALL_GREEN" '["c"]')" "c"
-# A re-run leaves the old failure in the list under the same name. Requiring
-# ANY success rather than ALL non-failure is what makes a re-run count as green.
+# A re-run leaves the old attempt in the list under the same name. Only the
+# highest check-run ID counts, so a stale success cannot hide a newer failure.
 chk "re-run: old failure + new success under one name -> green" \
-  "$(missing '[{"check_runs":[{"name":"a","conclusion":"failure"},{"name":"a","conclusion":"success"}]}]' '["a"]')" ""
+  "$(missing '[{"check_runs":[{"id":1,"name":"a","status":"completed","conclusion":"failure"},{"id":2,"name":"a","status":"completed","conclusion":"success"}]}]' '["a"]')" ""
+chk "re-run: old success + new failure under one name -> missing" \
+  "$(missing '[{"check_runs":[{"id":1,"name":"a","status":"completed","conclusion":"success"},{"id":2,"name":"a","status":"completed","conclusion":"failure"}]}]' '["a"]')" "a"
+chk "re-run: old success + new pending under one name -> missing" \
+  "$(missing '[{"check_runs":[{"id":1,"name":"a","status":"completed","conclusion":"success"},{"id":2,"name":"a","status":"in_progress","conclusion":null}]}]' '["a"]')" "a"
 chk "check name containing spaces and parens" \
-  "$(missing '[{"check_runs":[{"name":"Backend (pytest)","conclusion":"success"}]}]' '["Backend (pytest)"]')" ""
+  "$(missing '[{"check_runs":[{"id":1,"name":"Backend (pytest)","status":"completed","conclusion":"success"}]}]' '["Backend (pytest)"]')" ""
 # Pagination: a required check on a later page must not read as absent.
 chk "required check on page 2 is found" \
-  "$(missing '[{"check_runs":[{"name":"a","conclusion":"success"}]},{"check_runs":[{"name":"b","conclusion":"success"}]}]' '["a","b"]')" ""
+  "$(missing '[{"check_runs":[{"id":1,"name":"a","status":"completed","conclusion":"success"}]},{"check_runs":[{"id":2,"name":"b","status":"completed","conclusion":"success"}]}]' '["a","b"]')" ""
 
 section "Terminal non-failure checks — these wake nothing and must be reported"
 BLOCKED_F='.[] as $req
@@ -99,13 +107,13 @@ BLOCKED_F='.[] as $req
       | "\($req): \(.conclusion)"'
 blocked() { printf '%s' "$2" | jq -r --argjson have "$(runs "$1")" "$BLOCKED_F"; }
 chk "cancelled is reported" \
-  "$(blocked '[{"check_runs":[{"name":"a","conclusion":"cancelled"}]}]' '["a"]')" "a: cancelled"
+  "$(blocked '[{"check_runs":[{"id":1,"name":"a","status":"completed","conclusion":"cancelled"}]}]' '["a"]')" "a: cancelled"
 chk "timed_out is reported" \
-  "$(blocked '[{"check_runs":[{"name":"a","conclusion":"timed_out"}]}]' '["a"]')" "a: timed_out"
+  "$(blocked '[{"check_runs":[{"id":1,"name":"a","status":"completed","conclusion":"timed_out"}]}]' '["a"]')" "a: timed_out"
 chk "a plain failure is NOT reported as terminal-non-failure" \
-  "$(blocked '[{"check_runs":[{"name":"a","conclusion":"failure"}]}]' '["a"]')" ""
+  "$(blocked '[{"check_runs":[{"id":1,"name":"a","status":"completed","conclusion":"failure"}]}]' '["a"]')" ""
 chk "a running check is NOT reported as terminal-non-failure" \
-  "$(blocked '[{"check_runs":[{"name":"a","conclusion":null}]}]' '["a"]')" ""
+  "$(blocked '[{"check_runs":[{"id":1,"name":"a","status":"in_progress","conclusion":null}]}]' '["a"]')" ""
 
 # ---------------------------------------------------------------------------
 section "Round counter — the only bound on a runaway loop"
@@ -214,24 +222,26 @@ chk "reviews across pages (the branch-reset shape)" \
 
 # ---------------------------------------------------------------------------
 section "Mergeability — before the claim and again after it"
-merge_gate() { case "$1" in dirty|unknown) echo SKIP;; *) echo PROCEED;; esac; }
-for st in dirty unknown clean blocked behind draft; do
+merge_gate() { if [ "$2" = true ]; then echo SKIP; else case "$1" in dirty|unknown) echo SKIP;; *) echo PROCEED;; esac; fi; }
+for st in dirty unknown clean blocked behind; do
   case "$st" in dirty|unknown) w=SKIP;; *) w=PROCEED;; esac
-  chk "mergeable_state=$st -> $w" "$(merge_gate "$st")" "$w"
+  chk "mergeable_state=$st -> $w" "$(merge_gate "$st" false)" "$w"
 done
+chk "draft flag -> SKIP" "$(merge_gate clean true)" "SKIP"
 # `blocked` is the ordinary required-checks-and-review gate, not a conflict.
 # Treating it as one would park every PR merely awaiting review.
-post_claim() { # head_was, head_now, state_now
-  if [ -n "$2" ] && { [ "$2" != "$1" ] || [ "$3" = dirty ] || [ "$3" = unknown ]; }
+post_claim() { # head_was, head_now, state_now, draft_now
+  if [ -n "$2" ] && { [ "$2" != "$1" ] || [ "$3" = dirty ] || [ "$3" = unknown ] || [ "$4" = true ]; }
   then echo RESTORE; else echo PROCEED; fi
 }
-chk "post-claim: unchanged and clean -> proceed" "$(post_claim abc abc clean)" "PROCEED"
-chk "post-claim: head moved -> restore" "$(post_claim abc def clean)" "RESTORE"
-chk "post-claim: base advanced, head unchanged, now dirty -> restore" "$(post_claim abc abc dirty)" "RESTORE"
-chk "post-claim: became unknown -> restore" "$(post_claim abc abc unknown)" "RESTORE"
-chk "post-claim: blocked still proceeds" "$(post_claim abc abc blocked)" "PROCEED"
+chk "post-claim: unchanged and clean -> proceed" "$(post_claim abc abc clean false)" "PROCEED"
+chk "post-claim: head moved -> restore" "$(post_claim abc def clean false)" "RESTORE"
+chk "post-claim: base advanced, head unchanged, now dirty -> restore" "$(post_claim abc abc dirty false)" "RESTORE"
+chk "post-claim: became unknown -> restore" "$(post_claim abc abc unknown false)" "RESTORE"
+chk "post-claim: became draft -> restore" "$(post_claim abc abc clean true)" "RESTORE"
+chk "post-claim: blocked still proceeds" "$(post_claim abc abc blocked false)" "PROCEED"
 chk "post-claim: unreadable -> proceed (do not let a transient failure mute the sweep)" \
-  "$(post_claim abc '' '')" "PROCEED"
+  "$(post_claim abc '' '' false)" "PROCEED"
 after="abc123 dirty"
 chk "post-claim: sha/state field split, sha" "${after%% *}" "abc123"
 chk "post-claim: sha/state field split, state" "${after##* }" "dirty"
@@ -508,6 +518,14 @@ chk "sweep claims the gate by DELETE before posting" \
   "$(grep -c 'X DELETE .*labels/\${LABEL}' "$SWEEP")" "2"
 chk "ci-green claims the gate before posting" \
   "$(awk '/Claim the gate/{c=NR} /Re-ping Codex/{p=NR} END{print (c>0 && p>c) ? "yes" : "no"}' "$GREEN")" "yes"
+chk "ci-green rechecks draft status before hard-stop mutation" \
+  "$(grep -c 'became draft before hard-stop escalation' "$GREEN")" "1"
+chk "ci-red rechecks draft status before hard-stop mutation" \
+  "$(grep -c 'became draft before hard-stop escalation' "$RED")" "1"
+chk "review wake-up rechecks draft status before hard-stop mutation" \
+  "$(grep -c 'became draft before hard-stop escalation' "$REVIEW")" "1"
+chk "scheduled sweep rechecks draft status before hard-stop mutation" \
+  "$(grep -c 'hardstop_draft=' "$SWEEP")" "1"
 
 # Drift is counted here rather than in `filter`, for the subshell reason above.
 fail=$((fail + $(grep -c . "$DRIFT_LOG" 2>/dev/null || true)))

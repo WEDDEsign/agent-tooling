@@ -10,6 +10,9 @@ import unittest
 ROOT = Path(__file__).parents[2]
 SYNC_PATH = ROOT / "codex" / "sync-pr-review-heartbeat.py"
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "wake-on-codex-review.yml"
+CI_GREEN_PATH = ROOT / ".github" / "workflows" / "wake-on-ci-green.yml"
+CI_RED_PATH = ROOT / ".github" / "workflows" / "wake-on-ci-red.yml"
+SWEEP_PATH = ROOT / ".github" / "workflows" / "sweep-stalled-repings.yml"
 LABELS_PATH = ROOT / "labels" / "labels.json"
 
 spec = importlib.util.spec_from_file_location("sync_pr_review_heartbeat", SYNC_PATH)
@@ -58,6 +61,96 @@ class OwnershipGuardTests(unittest.TestCase):
 
         self.assertIn("codex-only", labels)
         self.assertEqual("10A37F", labels["codex-only"]["color"])
+
+
+class CiGreenClaimTests(unittest.TestCase):
+    def test_claim_rechecks_head_and_latest_checks_before_trigger(self):
+        workflow = CI_GREEN_PATH.read_text(encoding="utf-8")
+        claim = workflow.index("Claim the gate (remove awaiting-codex-reping)")
+        delete = workflow.index("gh api -X DELETE", claim)
+        reread = workflow.index(
+            'after=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}"', delete
+        )
+        check_reread = workflow.index("have_after=$(gh api", reread)
+        latest_attempt = workflow.index(
+            "group_by(.name) | map(max_by(.id))", check_reread
+        )
+        restore = workflow.index(
+            'restore_and_stand_down "required checks are no longer green',
+            latest_attempt,
+        )
+        trigger = workflow.index("Re-ping Codex (bare trigger, posted directly)", restore)
+
+        self.assertLess(delete, reread)
+        self.assertLess(reread, check_reread)
+        self.assertLess(check_reread, latest_attempt)
+        self.assertLess(latest_attempt, restore)
+        self.assertLess(restore, trigger)
+
+    def test_event_claim_rejects_terminal_pr_before_trigger(self):
+        workflow = CI_GREEN_PATH.read_text(encoding="utf-8")
+        claim = workflow.index("Claim the gate (remove awaiting-codex-reping)")
+        terminal = workflow.index('pr_state}" != "open"', claim)
+        trigger = workflow.index("Re-ping Codex (bare trigger, posted directly)", terminal)
+
+        self.assertLess(terminal, trigger)
+
+    def test_event_transport_rejects_drafts_before_and_after_claim(self):
+        workflow = CI_GREEN_PATH.read_text(encoding="utf-8")
+        gate = workflow.index("Check label and required-check status")
+        claim = workflow.index("Claim the gate (remove awaiting-codex-reping)")
+        trigger = workflow.index("Re-ping Codex (bare trigger, posted directly)")
+        pre_claim = workflow.index('is_draft=$(gh api', gate)
+        post_claim = workflow.index('draft_now=$(printf', claim)
+
+        self.assertLess(pre_claim, claim)
+        self.assertLess(claim, post_claim)
+        self.assertLess(post_claim, trigger)
+
+    def test_event_transport_warns_only_after_winning_claim(self):
+        workflow = CI_GREEN_PATH.read_text(encoding="utf-8")
+        claim = workflow.index("Claim the gate (remove awaiting-codex-reping)")
+        warning = workflow.index("Post soft-warn (separate comment)")
+        trigger = workflow.index("Re-ping Codex (bare trigger, posted directly)")
+
+        self.assertLess(claim, warning)
+        self.assertLess(warning, trigger)
+        self.assertIn("steps.claim.outputs.won == 'true'", workflow[warning:trigger])
+
+    def test_ci_red_transport_rejects_drafts_before_wake_up(self):
+        workflow = CI_RED_PATH.read_text(encoding="utf-8")
+        gate = workflow.index("Check awaiting-codex-reping label")
+        wake = workflow.index("Post @Claude wake-up comment")
+        initial_read = workflow.index('is_draft=$(gh api', gate)
+        final_read = workflow.index('is_draft=$(gh api', wake)
+
+        self.assertLess(initial_read, wake)
+        self.assertGreater(final_read, wake)
+
+    def test_sweep_claim_rechecks_terminal_state_and_latest_checks(self):
+        workflow = SWEEP_PATH.read_text(encoding="utf-8")
+        claim = workflow.index("# Claim the gate.")
+        terminal = workflow.index('pr_state}" != "open"', claim)
+        check_reread = workflow.index("runs_after=$(gh api", terminal)
+        latest_attempt = workflow.index(
+            "group_by(.name) | map(max_by(.id))", check_reread
+        )
+        trigger = workflow.index('gh pr comment "${pr}"', latest_attempt)
+
+        self.assertLess(terminal, check_reread)
+        self.assertLess(check_reread, latest_attempt)
+        self.assertLess(latest_attempt, trigger)
+
+    def test_sweep_rejects_drafts_before_and_after_claim(self):
+        workflow = SWEEP_PATH.read_text(encoding="utf-8")
+        initial_read = workflow.index('is_draft=$(printf')
+        claim = workflow.index("# Claim the gate.")
+        post_claim = workflow.index('draft_now=$(printf', claim)
+        trigger = workflow.index('gh pr comment "${pr}"', post_claim)
+
+        self.assertLess(initial_read, claim)
+        self.assertLess(claim, post_claim)
+        self.assertLess(post_claim, trigger)
 
 
 if __name__ == "__main__":

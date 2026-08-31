@@ -90,6 +90,13 @@ jobs:
             exit 0
           fi
 
+          is_draft=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.draft')
+          if [ "${is_draft}" = "true" ]; then
+            echo "PR #${PR_NUMBER} is draft — leaving the review gate armed and skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # workflow_run fires once per CI workflow; the others may still be
           # running. Verify EVERY required check-run name is success for this
           # SHA before waking Claude. required_checks is a JSON array, so names
@@ -100,13 +107,14 @@ jobs:
           # despite green CI. Same defect the sweep carries; same fix.
           have=$(gh api --paginate --slurp \
             "repos/${REPO}/commits/${HEAD_SHA}/check-runs?per_page=100" \
-            | jq -c '[.[].check_runs[] | {name, conclusion}]')
-          # For each required check NAME ($req), it is "missing" unless some
-          # check-run with that name concluded success. Bind $req so the inner
-          # `.name` comparison isn't shadowed by jq's `.` rebinding.
+            | jq -c '[.[].check_runs[] | {id, name, status, conclusion}]
+                     | group_by(.name) | map(max_by(.id))')
+          # For each required check NAME ($req), use only its latest attempt.
+          # An older success must not hide a pending or failed re-run.
           missing=$(printf '%s' "$REQUIRED_CHECKS" | jq -r --argjson have "$have" '
             .[] as $req
-            | select(($have | any(.name == $req and .conclusion == "success")) | not)
+            | select(($have | any(.name == $req and .status == "completed"
+                                  and .conclusion == "success")) | not)
             | $req')
           if [ -n "${missing}" ]; then
             echo "Not all required checks green for ${HEAD_SHA}. Still pending/failed:"
@@ -147,6 +155,11 @@ jobs:
           ESCALATION_HANDLE: ${{ inputs.escalation_handle }}
         run: |
           set -eu
+          is_draft=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.draft')
+          if [ "${is_draft}" = "true" ]; then
+            echo "PR #${PR_NUMBER} became draft before hard-stop escalation — standing down."
+            exit 0
+          fi
           gh label create loop-stuck \
             --color B60205 \
             --description "Codex review autopilot exceeded round 25 — human intervention required" \
@@ -155,20 +168,6 @@ jobs:
           gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot has reached **round ${ROUND}** on this PR with all required checks green. The hard-stop threshold (25) has been crossed; not posting the Codex review trigger.
 
           The \`loop-stuck\` label has been added. To resume the autopilot remove that label and re-trigger Codex manually, or close the loop."
-
-      # Soft-warn (round >= 10) goes in its own comment addressed to the human —
-      # NEVER appended to the trigger, or it would flip Codex into action mode.
-      - name: Post soft-warn (separate comment)
-        if: steps.gate.outputs.skip != 'true' && steps.round.outputs.mode == 'softwarn'
-        env:
-          GH_TOKEN: ${{ secrets.CEREMONY_PAT }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
-          ROUND: ${{ steps.round.outputs.round }}
-          ESCALATION_HANDLE: ${{ inputs.escalation_handle }}
-        run: |
-          set -eu
-          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot is at **round ${ROUND}** on this PR. Re-pinging Codex automatically (next comment). If this loop is oscillating (round N's findings ≈ round N-2's), consider stepping in. Hard-stop at round 25."
 
       # The label removal comes BEFORE the post, and is the claim rather than
       # the cleanup. `sweep-stalled-repings` runs on a schedule and can evaluate
@@ -191,16 +190,97 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REQUIRED_CHECKS: ${{ inputs.required_checks }}
         run: |
           set -eu
+          restore_and_stand_down() {
+            why="$1"
+            if gh api -X POST "repos/${REPO}/issues/${PR_NUMBER}/labels" \
+              -f "labels[]=awaiting-codex-reping" >/dev/null 2>&1; then
+              echo "${why} after the gate was claimed — restored the gate and standing down."
+              echo "won=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::${why} after the gate was claimed, and the gate could not be restored. Re-apply awaiting-codex-reping by hand."
+            exit 1
+          }
+
           if gh api -X DELETE \
             "repos/${REPO}/issues/${PR_NUMBER}/labels/awaiting-codex-reping" \
             >/dev/null 2>&1; then
+            # The PR can move after the green-check gate read but before this
+            # atomic claim. Re-read after winning, and restore the gate instead
+            # of posting against a head whose checks were never verified. Match
+            # the scheduled sweep's handling of a head move or newly dirty /
+            # still-unknown mergeability.
+            after=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
+              --jq '[.state, (.merged | tostring), .head.sha, .mergeable_state, (.draft | tostring)] | @tsv' || echo "")
+            pr_state=$(printf '%s' "${after}" | cut -f1)
+            merged_now=$(printf '%s' "${after}" | cut -f2)
+            head_now=$(printf '%s' "${after}" | cut -f3)
+            state_now=$(printf '%s' "${after}" | cut -f4)
+            draft_now=$(printf '%s' "${after}" | cut -f5)
+            if [ -n "${after}" ] && { [ "${pr_state}" != "open" ] || [ "${merged_now}" = "true" ]; }; then
+              echo "PR #${PR_NUMBER} became terminal after the gate was claimed — leaving the gate consumed and standing down."
+              echo "won=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "${draft_now}" = "true" ]; then
+              restore_and_stand_down "PR #${PR_NUMBER} became draft"
+            fi
+            if [ -z "${after}" ] || [ "${head_now}" != "${HEAD_SHA}" ] || \
+               [ "${state_now}" = "dirty" ] || [ "${state_now}" = "unknown" ]; then
+              if [ -z "${after}" ]; then
+                why="the post-claim PR read failed"
+              elif [ "${head_now}" != "${HEAD_SHA}" ]; then
+                why="the head moved from ${HEAD_SHA} to ${head_now}"
+              else
+                why="mergeability became ${state_now}"
+              fi
+              restore_and_stand_down "${why}"
+            fi
+
+            # Required checks can be rerun after the pre-claim read. Re-read
+            # their latest attempts after winning the claim so a pending or
+            # failed rerun cannot consume the gate and trigger review.
+            have_after=$(gh api --paginate --slurp \
+              "repos/${REPO}/commits/${HEAD_SHA}/check-runs?per_page=100" \
+              | jq -c '[.[].check_runs[] | {id, name, status, conclusion}]
+                       | group_by(.name) | map(max_by(.id))' || echo "")
+            if [ -z "${have_after}" ]; then
+              restore_and_stand_down "the post-claim required-check read failed"
+            fi
+            not_green=$(printf '%s' "$REQUIRED_CHECKS" \
+              | jq -r --argjson have "${have_after}" '
+                  .[] as $req
+                  | select(($have | any(.name == $req and .status == "completed"
+                                        and .conclusion == "success")) | not)
+                  | $req')
+            if [ -n "${not_green}" ]; then
+              restore_and_stand_down "required checks are no longer green: ${not_green}"
+            fi
             echo "won=true" >> "$GITHUB_OUTPUT"
           else
             echo "The gate label was already gone — the scheduled sweep claimed it. Standing down."
             echo "won=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # Soft-warn (round >= 10) goes in its own comment addressed to the human —
+      # NEVER appended to the trigger, or it would flip Codex into action mode.
+      # Post only after this run has won the claim and completed every reread;
+      # otherwise a losing transport promises a trigger it will not post.
+      - name: Post soft-warn (separate comment)
+        if: steps.claim.outputs.won == 'true' && steps.round.outputs.mode == 'softwarn'
+        env:
+          GH_TOKEN: ${{ secrets.CEREMONY_PAT }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          ROUND: ${{ steps.round.outputs.round }}
+          ESCALATION_HANDLE: ${{ inputs.escalation_handle }}
+        run: |
+          set -eu
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot is at **round ${ROUND}** on this PR. Re-pinging Codex automatically (next comment). If this loop is oscillating (round N's findings ≈ round N-2's), consider stepping in. Hard-stop at round 25."
 
       - name: Re-ping Codex (bare trigger, posted directly)
         if: steps.claim.outputs.won == 'true'
