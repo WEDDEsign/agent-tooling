@@ -32,6 +32,11 @@
       "description": "Codex owns this PR; suppress the Claude author wake-up"
     },
     {
+      "name": "grok-task",
+      "color": "111111",
+      "description": "Grok owns this PR; suppress Claude wake-up. Repo-wide Grok check-ins act only on this label."
+    },
+    {
       "name": "awaiting-codex-reping",
       "color": "BFD4F2",
       "description": "Codex review autopilot is mid-loop, waiting for green CI to post @codex review"

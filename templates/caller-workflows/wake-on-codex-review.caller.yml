@@ -23,6 +23,9 @@ permissions:
 
 jobs:
   call:
+    # Another agent owns the PR. `codex-only` is skipped inside the reusable;
+    # `grok-task` is skipped here so older pins still honor it.
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'grok-task') }}
     uses: WEDDEsign/agent-tooling/.github/workflows/wake-on-codex-review.yml@v0.1.5
     with:
       escalation_handle: '@WEDDEsign'

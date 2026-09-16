@@ -14,6 +14,9 @@ CI_GREEN_PATH = ROOT / ".github" / "workflows" / "wake-on-ci-green.yml"
 CI_RED_PATH = ROOT / ".github" / "workflows" / "wake-on-ci-red.yml"
 SWEEP_PATH = ROOT / ".github" / "workflows" / "sweep-stalled-repings.yml"
 LABELS_PATH = ROOT / "labels" / "labels.json"
+CALLER_TEMPLATE_PATH = (
+    ROOT / "templates" / "caller-workflows" / "wake-on-codex-review.caller.yml"
+)
 
 spec = importlib.util.spec_from_file_location("sync_pr_review_heartbeat", SYNC_PATH)
 sync_module = importlib.util.module_from_spec(spec)
@@ -54,6 +57,10 @@ class OwnershipGuardTests(unittest.TestCase):
             "!contains(github.event.pull_request.labels.*.name, 'codex-only')",
             workflow,
         )
+        self.assertIn(
+            "!contains(github.event.pull_request.labels.*.name, 'grok-task')",
+            workflow,
+        )
 
     def test_fallback_owner_label_is_seeded(self):
         taxonomy = json.loads(LABELS_PATH.read_text(encoding="utf-8"))
@@ -61,6 +68,15 @@ class OwnershipGuardTests(unittest.TestCase):
 
         self.assertIn("codex-only", labels)
         self.assertEqual("10A37F", labels["codex-only"]["color"])
+        self.assertIn("grok-task", labels)
+        self.assertEqual("111111", labels["grok-task"]["color"])
+
+    def test_caller_template_skips_grok_task(self):
+        template = CALLER_TEMPLATE_PATH.read_text(encoding="utf-8")
+        self.assertIn(
+            "!contains(github.event.pull_request.labels.*.name, 'grok-task')",
+            template,
+        )
 
 
 class CiGreenClaimTests(unittest.TestCase):
