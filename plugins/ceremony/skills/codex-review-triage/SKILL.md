@@ -77,6 +77,11 @@ act, delegate to Codex, escalate, or decline-in-thread-with-reasoning.
 | Backend infra / data-model migrations / shared libraries | **15 rounds** | Wide blast radius — worth defending |
 | AI surfaces (LLM-call sites, prompt pipelines, eval harnesses) | **15 rounds** | Same blast radius as backend infra |
 
+*This table is self-policed — you decide when you've hit it. §7 below is the
+mechanical backstop for when that doesn't happen: it caps at the table's
+highest tier (15), not per-surface, so it can trail a low-tier cap by a wide
+margin but never a high-tier one.*
+
 **At the cap, the escalation message includes:** round count + approximate diff
 size; a one-line summary of each open finding; a recommendation (continue /
 prune = squash + strip defensive code / merge as-is).
@@ -148,7 +153,7 @@ take over:
 
 1. **Bump the round counter.** Read the existing `codex-round-N` label (absent ⇒
    `N=0`), remove it, add `codex-round-{N+1}` (create on the fly if missing).
-   This counter drives the soft-warn (≥10) and hard-stop (≥25) thresholds —
+   This counter drives the soft-warn (≥10) and hard-stop (≥15) thresholds —
    skip it and the hard-stop never fires.
 
    ```sh
@@ -194,18 +199,31 @@ Stop when **any** is true:
 A bare 👍, "lgtm", "looks good", or a green-styled review *without* the
 `APPROVED` token or the template do **not** terminate the loop.
 
-## 7. Hard stop (workflow-enforced)
+## 7. Hard stop (workflow-enforced, layered under §3)
 
-The round counter enforces termination:
+The round counter enforces termination as a backstop under the surface caps in
+§3 — those are self-policed (you notice and escalate); this is mechanical
+(the workflow acts whether or not you noticed):
 
-- **Soft-warn at round 10** — the wake-up workflows append *"Round N — consider
-  escalating via AskUserQuestion if this loop is oscillating."* Don't escalate
-  on every soft-warn (convergence often needs >10 rounds); **do** escalate if
-  round N's findings look like round N-2's (oscillation, not progress).
-- **Hard-stop at round 25** — the workflows refuse to wake Claude, post
-  `ESCALATION_HANDLE` instead, and add `loop-stuck`. The autopilot is paused
-  until a human removes `loop-stuck`. 25 is generous on purpose: real PRs have
-  legitimately needed 5–15 rounds.
+- **Soft-warn at round 10** (`softwarn_round` input, repo-tunable) — the
+  wake-up workflows append a reminder of §3's caps and ask whether you're
+  already past your surface's own number. Don't escalate on every soft-warn
+  (a wide-blast-radius surface can legitimately need more than 10 rounds);
+  **do** escalate if round N's findings look like round N-2's (oscillation,
+  not progress), or if you're already past your tier's cap.
+- **Hard-stop at round 15** (`hardstop_round` input, repo-tunable) — the
+  workflows refuse to wake Claude, post `ESCALATION_HANDLE` instead, and add
+  `loop-stuck`. The autopilot is paused until a human removes `loop-stuck`,
+  which re-arms the loop on the next Codex review. 15 matches §3's own
+  highest tier (backend infra / data-model migrations / shared libraries /
+  AI surfaces) — it is a blunt, surface-blind backstop for when §3's
+  self-policing didn't catch it in time, not a per-tier limit itself: a
+  3-round-tier CRUD PR can still reach round 15 before this fires.
+
+  This used to be round 25 — above every §3 tier, so it never actually
+  engaged. Mentra#2839 (a data-model migration, §3's 15-round tier) ran to
+  round 16 before a human intervened manually; the mechanical hard-stop was
+  never in the picture. Lowered in agent-tooling#15.
 
 ## Delegating back to Codex
 
