@@ -129,9 +129,13 @@ chk "a near-miss name is not a round label" "$(round '[[{"name":"codex-round-x"}
 # read as 0, which silently disabled both thresholds.
 chk "round label on page 2 is found" \
   "$(round '[[{"name":"a"}],[{"name":"codex-round-26"}]]')" "26"
-for r in 0 9 10 24 25 26; do
-  if [ "$r" -ge 25 ]; then m=hardstop; elif [ "$r" -ge 10 ]; then m=softwarn; else m=normal; fi
-  case $r in 0|9) w=normal;; 10|24) w=softwarn;; 25|26) w=hardstop;; esac
+# Defaults as of agent-tooling#15: softwarn=10 (unchanged), hardstop=15 (was
+# 25 — sat above every codex-review-triage §3 tier, so it never engaged on a
+# real marathon PR; see that issue and Mentra#2839). Both are workflow_call
+# inputs now, so this pins the DEFAULT boundary, not a hardcoded ceiling.
+for r in 0 9 10 14 15 16; do
+  if [ "$r" -ge 15 ]; then m=hardstop; elif [ "$r" -ge 10 ]; then m=softwarn; else m=normal; fi
+  case $r in 0|9) w=normal;; 10|14) w=softwarn;; 15|16) w=hardstop;; esac
   chk "round $r -> $w" "$m" "$w"
 done
 

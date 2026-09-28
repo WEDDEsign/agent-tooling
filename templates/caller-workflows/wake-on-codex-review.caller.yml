@@ -27,5 +27,7 @@ jobs:
     with:
       escalation_handle: '@WEDDEsign'
       required_checks_text: 'the required checks'   # e.g. '`Backend (pytest)`, `Frontend (tsc + build)`'
+      # softwarn_round: 10   # optional override; defaults to 10 (codex-review-triage §7)
+      # hardstop_round: 15   # optional override; defaults to 15, codex-review-triage §3's highest surface tier
     secrets:
       CEREMONY_PAT: ${{ secrets.CEREMONY_PAT }}

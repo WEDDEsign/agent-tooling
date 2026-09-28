@@ -23,7 +23,8 @@ name: Wake Claude on CI green (reusable)
 # as checks), so repos with spaces/parens in names (e.g. "Backend (pytest)")
 # work unchanged.
 #
-# Hard-stop at round >= 25 escalates instead of waking, and does NOT remove
+# Hard-stop at round >= hardstop_round (default 15; see wake-on-codex-review.yml
+# for why) escalates instead of waking, and does NOT remove
 # `awaiting-codex-reping` (keeps loop state consistent for the human).
 
 on:
@@ -36,6 +37,14 @@ on:
       escalation_handle:
         type: string
         default: '@WEDDEsign'
+      softwarn_round:
+        description: 'Round at which the soft-warn comment fires. Match wake-on-codex-review''s value.'
+        type: number
+        default: 10
+      hardstop_round:
+        description: 'Round at which this workflow escalates instead of re-pinging. Match wake-on-codex-review''s value.'
+        type: number
+        default: 15
     secrets:
       CEREMONY_PAT:
         required: true
@@ -132,14 +141,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          SOFTWARN_ROUND: ${{ inputs.softwarn_round }}
+          HARDSTOP_ROUND: ${{ inputs.hardstop_round }}
         run: |
           set -eu
           n=$(gh api --paginate --slurp "repos/${REPO}/issues/${PR_NUMBER}/labels?per_page=100" \
             | jq -r '[.[][] | .name | capture("^codex-round-(?<n>[0-9]+)$") | .n | tonumber] | max // 0')
           echo "round=${n}" >> "$GITHUB_OUTPUT"
-          if [ "${n}" -ge 25 ]; then
+          if [ "${n}" -ge "${HARDSTOP_ROUND}" ]; then
             echo "mode=hardstop" >> "$GITHUB_OUTPUT"
-          elif [ "${n}" -ge 10 ]; then
+          elif [ "${n}" -ge "${SOFTWARN_ROUND}" ]; then
             echo "mode=softwarn" >> "$GITHUB_OUTPUT"
           else
             echo "mode=normal" >> "$GITHUB_OUTPUT"
@@ -153,6 +164,7 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           ROUND: ${{ steps.round.outputs.round }}
           ESCALATION_HANDLE: ${{ inputs.escalation_handle }}
+          HARDSTOP_ROUND: ${{ inputs.hardstop_round }}
         run: |
           set -eu
           is_draft=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.draft')
@@ -162,10 +174,10 @@ jobs:
           fi
           gh label create loop-stuck \
             --color B60205 \
-            --description "Codex review autopilot exceeded round 25 — human intervention required" \
+            --description "Codex review autopilot exceeded round ${HARDSTOP_ROUND} — human intervention required" \
             2>/dev/null || true
           gh pr edit "${PR_NUMBER}" --repo "${REPO}" --add-label loop-stuck
-          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot has reached **round ${ROUND}** on this PR with all required checks green. The hard-stop threshold (25) has been crossed; not posting the Codex review trigger.
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot has reached **round ${ROUND}** on this PR with all required checks green. The hard-stop threshold (${HARDSTOP_ROUND}) has been crossed; not posting the Codex review trigger.
 
           The \`loop-stuck\` label has been added. To resume the autopilot remove that label and re-trigger Codex manually, or close the loop."
 
@@ -278,9 +290,10 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           ROUND: ${{ steps.round.outputs.round }}
           ESCALATION_HANDLE: ${{ inputs.escalation_handle }}
+          HARDSTOP_ROUND: ${{ inputs.hardstop_round }}
         run: |
           set -eu
-          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot is at **round ${ROUND}** on this PR. Re-pinging Codex automatically (next comment). If this loop is oscillating (round N's findings ≈ round N-2's), consider stepping in. Hard-stop at round 25."
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot is at **round ${ROUND}** on this PR. Re-pinging Codex automatically (next comment). If this loop is oscillating (round N's findings ≈ round N-2's), consider stepping in. Hard-stop at round ${HARDSTOP_ROUND}."
 
       - name: Re-ping Codex (bare trigger, posted directly)
         if: steps.claim.outputs.won == 'true'

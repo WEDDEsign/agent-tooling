@@ -126,6 +126,14 @@ on:
         description: 'The mid-loop gate label the sweep looks for.'
         type: string
         default: 'awaiting-codex-reping'
+      softwarn_round:
+        description: 'Round at which the sweep adds a reminder of the codex-review-triage §3 surface caps. Match wake-on-ci-green''s value.'
+        type: number
+        default: 10
+      hardstop_round:
+        description: 'Round at which the sweep escalates instead of re-pinging. Match wake-on-ci-green''s value — this mirrors that hard-stop so the sweep cannot be a way around it.'
+        type: number
+        default: 15
 
     secrets:
       CEREMONY_PAT:
@@ -161,6 +169,8 @@ jobs:
           REQUIRED_CHECKS: ${{ inputs.required_checks }}
           ESCALATION_HANDLE: ${{ inputs.escalation_handle }}
           LABEL: ${{ inputs.label }}
+          SOFTWARN_ROUND: ${{ inputs.softwarn_round }}
+          HARDSTOP_ROUND: ${{ inputs.hardstop_round }}
         run: |
           set -euo pipefail
 
@@ -315,14 +325,14 @@ jobs:
             fi
 
             # Mirror wake-on-ci-green's hard stop. Without it the sweep would be a way
-            # around the round-25 ceiling, which is the one thing stopping a runaway
+            # around the hard-stop ceiling, which is the one thing stopping a runaway
             # loop. Escalate to the PR, not just to this summary — the human who has to
             # intervene never reads a scheduled run's logs. Guarded on `loop-stuck`
             # being absent, because unlike the event path this branch is re-entered
             # every ten minutes and would otherwise comment forever.
             round=$(gh api --paginate --slurp "repos/${REPO}/issues/${pr}/labels?per_page=100" \
               | jq -r '[.[][] | .name | capture("^codex-round-(?<n>[0-9]+)$") | .n | tonumber] | max // 0')
-            if [ "${round}" -ge 25 ]; then
+            if [ "${round}" -ge "${HARDSTOP_ROUND}" ]; then
               hardstop_draft=$(gh api "repos/${REPO}/pulls/${pr}" --jq '.draft' || echo "")
               if [ "${hardstop_draft}" != "false" ]; then
                 if [ "${hardstop_draft}" = "true" ]; then
@@ -340,12 +350,13 @@ jobs:
               # the only record. The marker makes the comment its own completion record,
               # so a half-finished escalation retries.
               # Scoped to the CURRENT hard-stop cycle, not to all history. A resumed loop
-              # gets a fresh 25-round budget, and exhausting that budget deserves a fresh
+              # gets a fresh hard-stop budget, and exhausting that budget deserves a fresh
               # escalation — but the previous cycle's marker is still sitting in the
               # comments. Counting markers since the last time `loop-stuck` was REMOVED
               # bounds the search to this cycle exactly, using an event the recovery
               # already produces rather than a new marker format. (A round number in the
-              # marker would not work: a reset climbs back to 25 and collides.)
+              # marker would not work: a reset climbs back to the same threshold and
+              # collides.)
               resumed_at=$(last_unlabeled_at "${pr}" "loop-stuck")
               escalated=$(gh api --paginate --slurp "repos/${REPO}/issues/${pr}/comments?per_page=100" \
                 | jq -r --arg since "${resumed_at}" '
@@ -354,15 +365,15 @@ jobs:
               if [ "${escalated}" = "0" ]; then
                 gh label create loop-stuck \
                   --color B60205 \
-                  --description "Codex review autopilot exceeded round 25 — human intervention required" \
+                  --description "Codex review autopilot exceeded round ${HARDSTOP_ROUND} — human intervention required" \
                   2>/dev/null || true
                 gh pr edit "${pr}" --repo "${REPO}" --add-label loop-stuck
                 GH_TOKEN="${CEREMONY_PAT}" gh pr comment "${pr}" --repo "${REPO}" \
-                  --body "${ESCALATION_HANDLE} — Codex review autopilot has reached **round ${round}** on this PR. The hard-stop threshold (25) has been crossed; not posting the Codex review trigger.
+                  --body "${ESCALATION_HANDLE} — Codex review autopilot has reached **round ${round}** on this PR. The hard-stop threshold (${HARDSTOP_ROUND}) has been crossed; not posting the Codex review trigger.
 
           This was picked up by the scheduled sweep rather than the CI-green event, which means the event was missed as well — the PR would otherwise have sat here silently.
 
-          The \`loop-stuck\` label has been added. **To resume:** remove \`loop-stuck\` **and** the \`codex-round-${round}\` label, then re-trigger Codex manually. Both are required — the round label is read by \`wake-on-codex-review\` when your manual review comes back, and on its own it would hard-stop again immediately and re-apply \`loop-stuck\`, so removing only \`loop-stuck\` cannot resume the loop. Removing the round label resets the counter to zero, which is the point: you are choosing to give it another 25 rounds.
+          The \`loop-stuck\` label has been added. **To resume:** remove \`loop-stuck\` **and** the \`codex-round-${round}\` label, then re-trigger Codex manually. Both are required — the round label is read by \`wake-on-codex-review\` when your manual review comes back, and on its own it would hard-stop again immediately and re-apply \`loop-stuck\`, so removing only \`loop-stuck\` cannot resume the loop. Removing the round label resets the counter to zero, which is the point: you are choosing to give it another ${HARDSTOP_ROUND} rounds.
 
           **To stop instead:** remove the \`${LABEL}\` label.
 
@@ -510,9 +521,9 @@ jobs:
             # before the trigger AND before the restore below, leaving the PR with
             # neither — undiscoverable by any later sweep. A missing advisory costs a
             # human one nudge; a missing trigger costs the loop.
-            if [ "${round}" -ge 10 ]; then
+            if [ "${round}" -ge "${SOFTWARN_ROUND}" ]; then
               if ! GH_TOKEN="${CEREMONY_PAT}" gh pr comment "${pr}" --repo "${REPO}" \
-                --body "${ESCALATION_HANDLE} — Codex review autopilot is at **round ${round}** on this PR, recovered by the scheduled sweep. Re-pinging Codex automatically (next comment). If this loop is oscillating (round N's findings ≈ round N-2's), consider stepping in. Hard-stop at round 25."; then
+                --body "${ESCALATION_HANDLE} — Codex review autopilot is at **round ${round}** on this PR, recovered by the scheduled sweep. Re-pinging Codex automatically (next comment). If this loop is oscillating (round N's findings ≈ round N-2's), consider stepping in. Hard-stop at round ${HARDSTOP_ROUND}."; then
                 echo "::warning::Soft-warn comment failed on #${pr}; continuing to the trigger, which is the part that matters."
               fi
             fi

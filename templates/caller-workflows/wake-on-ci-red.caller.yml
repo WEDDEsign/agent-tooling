@@ -21,5 +21,7 @@ jobs:
     uses: WEDDEsign/agent-tooling/.github/workflows/wake-on-ci-red.yml@v0.1.5
     with:
       escalation_handle: '@WEDDEsign'
+      # softwarn_round: 10   # optional override; must match wake-on-codex-review's value
+      # hardstop_round: 15   # optional override; must match wake-on-codex-review's value
     secrets:
       CEREMONY_PAT: ${{ secrets.CEREMONY_PAT }}

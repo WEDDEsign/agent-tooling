@@ -16,8 +16,11 @@ name: Wake Claude on Codex review (reusable)
 #
 # Skip cases: Codex-owned branch or label / APPROVED state / APPROVED token /
 # "no major issues" template / non-Codex author / zero inline comments.
-# Hard-stop at round >= 25 swaps the @Claude wake-up for an escalation_handle
-# ping + `loop-stuck` label.
+# Hard-stop at round >= hardstop_round (default 15, matching
+# codex-review-triage §3's highest surface tier — was 25 until
+# WEDDEsign/agent-tooling#15, which sat above every §3 tier and so never
+# engaged on WEDDEsign/Mentra#2839's 16-round marathon) swaps the @Claude
+# wake-up for an escalation_handle ping + `loop-stuck` label.
 
 on:
   workflow_call:
@@ -30,6 +33,14 @@ on:
         description: 'Human-readable list of required checks, for the wake-up body.'
         type: string
         default: 'the required checks'
+      softwarn_round:
+        description: 'Round at which the wake-up comment adds a reminder of the codex-review-triage §3 surface caps.'
+        type: number
+        default: 10
+      hardstop_round:
+        description: 'Round at which the workflow stops auto-waking Claude and escalates instead. Defaults to codex-review-triage §3''s highest surface tier.'
+        type: number
+        default: 15
     secrets:
       CEREMONY_PAT:
         description: 'Fine-grained PAT used to author wake-up / escalation comments as a human identity.'
@@ -79,14 +90,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          SOFTWARN_ROUND: ${{ inputs.softwarn_round }}
+          HARDSTOP_ROUND: ${{ inputs.hardstop_round }}
         run: |
           set -eu
           n=$(gh api --paginate --slurp "repos/${REPO}/issues/${PR_NUMBER}/labels?per_page=100" \
             | jq -r '[.[][] | .name | capture("^codex-round-(?<n>[0-9]+)$") | .n | tonumber] | max // 0')
           echo "round=${n}" >> "$GITHUB_OUTPUT"
-          if [ "${n}" -ge 25 ]; then
+          if [ "${n}" -ge "${HARDSTOP_ROUND}" ]; then
             echo "mode=hardstop" >> "$GITHUB_OUTPUT"
-          elif [ "${n}" -ge 10 ]; then
+          elif [ "${n}" -ge "${SOFTWARN_ROUND}" ]; then
             echo "mode=softwarn" >> "$GITHUB_OUTPUT"
           else
             echo "mode=normal" >> "$GITHUB_OUTPUT"
@@ -101,6 +114,7 @@ jobs:
           ROUND: ${{ steps.round.outputs.round }}
           REVIEW_URL: ${{ github.event.review.html_url }}
           ESCALATION_HANDLE: ${{ inputs.escalation_handle }}
+          HARDSTOP_ROUND: ${{ inputs.hardstop_round }}
         run: |
           set -eu
           is_draft=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.draft')
@@ -110,10 +124,10 @@ jobs:
           fi
           gh label create loop-stuck \
             --color B60205 \
-            --description "Codex review autopilot exceeded round 25 — human intervention required" \
+            --description "Codex review autopilot exceeded round ${HARDSTOP_ROUND} — human intervention required" \
             2>/dev/null || true
           gh pr edit "${PR_NUMBER}" --repo "${REPO}" --add-label loop-stuck
-          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot has reached **round ${ROUND}** on this PR and Codex just submitted another review (${REVIEW_URL}). The hard-stop threshold (25) has been crossed; not waking Claude.
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot has reached **round ${ROUND}** on this PR and Codex just submitted another review (${REVIEW_URL}). The hard-stop threshold (${HARDSTOP_ROUND}) has been crossed; not waking Claude.
 
           The \`loop-stuck\` label has been added. To resume the autopilot remove that label and the next Codex review will wake Claude again, or close the loop manually."
 
@@ -128,13 +142,15 @@ jobs:
           ROUND: ${{ steps.round.outputs.round }}
           MODE: ${{ steps.round.outputs.mode }}
           REQUIRED_CHECKS_TEXT: ${{ inputs.required_checks_text }}
+          SOFTWARN_ROUND: ${{ inputs.softwarn_round }}
+          HARDSTOP_ROUND: ${{ inputs.hardstop_round }}
         run: |
           set -eu
           softwarn=""
           if [ "${MODE}" = "softwarn" ]; then
             softwarn="
 
-          **Round ${ROUND} — consider escalating via \`AskUserQuestion\` if this loop is oscillating.** Hard-stop at round 25."
+          **Round ${ROUND} — check whether you are already past this surface's documented cap** (\`codex-review-triage\` §3: 3 rounds internal CRUD, 8 customer-facing, 15 backend-infra / data-model / AI). If so, escalate via \`AskUserQuestion\` now rather than waiting for the workflow hard-stop at round ${HARDSTOP_ROUND}."
           fi
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body "@Claude — Codex submitted a review (state: \`${REVIEW_STATE}\`, see ${REVIEW_URL}).
 
@@ -146,4 +162,4 @@ jobs:
           4. Bump the round counter: read the existing \`codex-round-N\` label (absent means N=0), remove it, add \`codex-round-{N+1}\` (create the label on the fly if missing). This counter drives the soft-warn and hard-stop thresholds below.
           5. **Add the \`awaiting-codex-reping\` label.** This is the gate the CI-green and CI-red wake-ups read: without it, CI going green does nothing at all and the loop parks silently with no re-ping. Do both label operations, in that order, before your session ends.
           6. Once fix commits land **and** ${REQUIRED_CHECKS_TEXT} are green, the CI-green wake-up posts the bare Codex review trigger for you (directly). Never write that trigger phrase into a comment yourself — a Codex mention anywhere in a comment body, even quoted inside prose, flips Codex into action mode and it writes code instead of reviewing. If CI fails, the CI-red wake-up will spawn a session to push another fix.
-          7. Terminate when Codex submits a review with state \`APPROVED\`, posts \`APPROVED\` on its own line, or uses its fixed \"Codex Review: Didn't find any major issues\" approval template. Soft-warn at round 10, hard-stop at round 25 (workflow-enforced).${softwarn}"
+          7. Terminate when Codex submits a review with state \`APPROVED\`, posts \`APPROVED\` on its own line, or uses its fixed \"Codex Review: Didn't find any major issues\" approval template. Soft-warn at round ${SOFTWARN_ROUND}, hard-stop at round ${HARDSTOP_ROUND} (workflow-enforced).${softwarn}"

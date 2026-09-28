@@ -15,6 +15,14 @@ on:
       escalation_handle:
         type: string
         default: '@WEDDEsign'
+      softwarn_round:
+        description: 'Round at which the wake-up comment adds a soft-warn reminder. Match wake-on-codex-review''s value.'
+        type: number
+        default: 10
+      hardstop_round:
+        description: 'Round at which this workflow escalates instead of waking Claude. Match wake-on-codex-review''s value.'
+        type: number
+        default: 15
     secrets:
       CEREMONY_PAT:
         required: true
@@ -82,14 +90,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          SOFTWARN_ROUND: ${{ inputs.softwarn_round }}
+          HARDSTOP_ROUND: ${{ inputs.hardstop_round }}
         run: |
           set -eu
           n=$(gh api --paginate --slurp "repos/${REPO}/issues/${PR_NUMBER}/labels?per_page=100" \
             | jq -r '[.[][] | .name | capture("^codex-round-(?<n>[0-9]+)$") | .n | tonumber] | max // 0')
           echo "round=${n}" >> "$GITHUB_OUTPUT"
-          if [ "${n}" -ge 25 ]; then
+          if [ "${n}" -ge "${HARDSTOP_ROUND}" ]; then
             echo "mode=hardstop" >> "$GITHUB_OUTPUT"
-          elif [ "${n}" -ge 10 ]; then
+          elif [ "${n}" -ge "${SOFTWARN_ROUND}" ]; then
             echo "mode=softwarn" >> "$GITHUB_OUTPUT"
           else
             echo "mode=normal" >> "$GITHUB_OUTPUT"
@@ -105,6 +115,7 @@ jobs:
           FAILED_WORKFLOW: ${{ github.event.workflow_run.name }}
           FAILED_RUN_URL: ${{ github.event.workflow_run.html_url }}
           ESCALATION_HANDLE: ${{ inputs.escalation_handle }}
+          HARDSTOP_ROUND: ${{ inputs.hardstop_round }}
         run: |
           set -eu
           is_draft=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.draft')
@@ -114,10 +125,10 @@ jobs:
           fi
           gh label create loop-stuck \
             --color B60205 \
-            --description "Codex review autopilot exceeded round 25 — human intervention required" \
+            --description "Codex review autopilot exceeded round ${HARDSTOP_ROUND} — human intervention required" \
             2>/dev/null || true
           gh pr edit "${PR_NUMBER}" --repo "${REPO}" --add-label loop-stuck
-          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot has reached **round ${ROUND}** on this PR with CI red on \`${FAILED_WORKFLOW}\` (${FAILED_RUN_URL}). The hard-stop threshold (25) has been crossed; not waking Claude.
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot has reached **round ${ROUND}** on this PR with CI red on \`${FAILED_WORKFLOW}\` (${FAILED_RUN_URL}). The hard-stop threshold (${HARDSTOP_ROUND}) has been crossed; not waking Claude.
 
           The \`loop-stuck\` label has been added. To resume the autopilot remove that label and re-add \`awaiting-codex-reping\` if appropriate, or close the loop manually."
 
@@ -131,6 +142,7 @@ jobs:
           MODE: ${{ steps.round.outputs.mode }}
           FAILED_WORKFLOW: ${{ github.event.workflow_run.name }}
           FAILED_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          HARDSTOP_ROUND: ${{ inputs.hardstop_round }}
         run: |
           set -eu
           is_draft=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.draft')
@@ -142,7 +154,7 @@ jobs:
           if [ "${MODE}" = "softwarn" ]; then
             softwarn="
 
-          **Round ${ROUND} — consider escalating via \`AskUserQuestion\` if this loop is oscillating.**"
+          **Round ${ROUND} — check whether you are already past this surface's documented cap** (\`codex-review-triage\` §3: 3 rounds internal CRUD, 8 customer-facing, 15 backend-infra / data-model / AI). If so, escalate via \`AskUserQuestion\` now rather than waiting for the workflow hard-stop at round ${HARDSTOP_ROUND}."
           fi
           gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "@Claude — required check \`${FAILED_WORKFLOW}\` failed on this PR (${FAILED_RUN_URL}) and the \`awaiting-codex-reping\` label is set, so the **codex-review-triage** loop is mid-flight.
 
