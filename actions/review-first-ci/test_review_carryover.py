@@ -1,0 +1,184 @@
+"""A clean review carries across a base update that leaves the PR diff unchanged."""
+import copy
+import unittest
+from unittest.mock import patch
+
+from controller import Controller
+from policy import BOT, REPING
+from test_review_first import CONFIG, HEAD, NEXT, FakeAPI
+
+FILES = [{"filename": "app.py", "status": "modified", "sha": "1" * 40,
+          "patch": "@@ -1,3 +1,4 @@\n a\n+b\n c\n d"}]
+
+
+def summary(head=HEAD):
+    return {"id": 40, "user": {"login": BOT}, "updated_at": "2026-10-10T10:05:00Z",
+            "body": "<!-- codex-pull-request-review-summary -->\n"
+                    f"| **Code Review** | **Completed** | `{head[:7]}` | PR opened |"}
+
+
+def pull_at(head, api):
+    pr = copy.deepcopy(api.pull)
+    pr["head"]["sha"] = head
+    return pr
+
+
+class CarryAPI(FakeAPI):
+    def __init__(self):
+        super().__init__()
+        self.pull["changed_files"] = len(FILES)
+        self.files = copy.deepcopy(FILES)
+        self.discussion = [summary()]
+        self.reviews, self.inline = [], []
+        self.reactions = [{"user": {"login": BOT}, "content": "+1", "created_at": "2026-10-10T10:05:01Z"}]
+
+    def comments(self, _):
+        return copy.deepcopy(self.discussion)
+
+    def pages(self, path, key=None):
+        if path.endswith("/reactions"):
+            return copy.deepcopy(self.reactions) if path.startswith("issues/comments/") else []
+        if path == "pulls/1/reviews":
+            return copy.deepcopy(self.reviews)
+        if path == "pulls/1/comments":
+            return copy.deepcopy(self.inline)
+        return super().pages(path, key)
+
+    def update_base(self):
+        """Merge the base branch in: new head, new base, identical PR diff."""
+        self.pull["head"]["sha"] = NEXT
+        self.pull["base"]["sha"] = "d" * 40
+
+
+class CarryoverTests(unittest.TestCase):
+    def setUp(self):
+        self.api = CarryAPI()
+        self.controller = Controller(self.api, None, "pilot", CONFIG)
+
+    def reviewed_then_updated(self):
+        state = {"opened_head": HEAD}
+        self.assertEqual(self.controller.review(self.api.pr(1), state, self.api.comments(1)), "clean")
+        self.assertEqual(state["reviewed"]["head"], HEAD)
+        self.api.update_base()
+        return state
+
+    def verdict(self, state):
+        return self.controller.review(self.api.pr(1), state, self.api.comments(1))
+
+    def test_base_update_with_identical_diff_keeps_the_review(self):
+        state = self.reviewed_then_updated()
+        self.assertEqual(self.verdict(state), "clean")
+        self.assertEqual(state["reviewed"]["head"], HEAD, "The carried review stays anchored to its head")
+
+    def test_changed_diff_needs_a_fresh_review(self):
+        state = self.reviewed_then_updated()
+        self.api.files[0]["patch"] += "\n+conflict resolution"
+        self.assertEqual(self.verdict(state), "missing")
+
+    def test_unlisted_files_never_carry(self):
+        state = self.reviewed_then_updated()
+        self.api.pull["changed_files"] = 3001
+        self.assertEqual(self.verdict(state), "missing")
+
+    def test_withdrawn_original_review_does_not_carry(self):
+        state = self.reviewed_then_updated()
+        self.api.discussion.clear()
+        self.assertEqual(self.verdict(state), "missing")
+
+    def test_later_finding_on_the_original_head_does_not_carry(self):
+        state = self.reviewed_then_updated()
+        self.api.inline.append({"user": {"login": BOT}, "commit_id": HEAD,
+                                "created_at": "2026-10-10T10:20:00Z", "updated_at": "2026-10-10T10:20:00Z"})
+        self.assertEqual(self.verdict(state), "missing")
+
+    def test_codex_activity_on_the_new_head_governs(self):
+        state = self.reviewed_then_updated()
+        self.api.inline.append({"user": {"login": BOT}, "commit_id": NEXT,
+                                "created_at": "2026-10-10T10:20:00Z", "updated_at": "2026-10-10T10:20:00Z"})
+        self.assertEqual(self.verdict(state), "missing")
+
+    def test_newly_armed_gate_still_requests_a_review(self):
+        state = self.reviewed_then_updated()
+        self.api.pull["labels"].append({"name": REPING})
+        self.api.events = [{"id": 7, "event": "labeled", "label": {"name": REPING}}]
+        self.assertEqual(self.verdict(state), "missing")
+
+    def test_review_of_an_intervening_head_ends_the_carry_over(self):
+        state = self.reviewed_then_updated()
+        self.api.inline.append({"user": {"login": BOT}, "commit_id": "e" * 40,
+                                "created_at": "2026-10-10T10:20:00Z", "updated_at": "2026-10-10T10:20:00Z"})
+        self.assertEqual(self.verdict(state), "missing", "A revert must not hide an intervening finding")
+
+    def test_findings_before_this_review_was_requested_do_not_block(self):
+        state = self.reviewed_then_updated()
+        self.api.inline.append({"user": {"login": BOT}, "commit_id": "e" * 40,
+                                "created_at": "2026-10-10T09:50:00Z", "updated_at": "2026-10-10T09:50:00Z"})
+        self.assertEqual(self.verdict(state), "clean", "Earlier rounds' findings predate the clean review")
+
+    def test_a_later_review_request_ends_the_carry_over(self):
+        state = self.reviewed_then_updated()
+        state["requested"] = {"head": "e" * 40, "gate_id": 8, "id": 9, "at": "2026-10-10T10:20:00Z"}
+        self.assertEqual(self.verdict(state), "missing")
+
+    def test_patchless_files_never_carry(self):
+        self.api.files[0].pop("patch")
+        state = {"opened_head": HEAD}
+        self.assertEqual(self.verdict(state), "clean")
+        self.assertNotIn("reviewed", state)
+        self.api.update_base()
+        self.assertEqual(self.verdict(state), "missing")
+
+    def test_digest_is_not_recorded_when_the_head_moves_mid_read(self):
+        state = {"opened_head": HEAD}
+        moved = copy.deepcopy(self.api.pull)
+        moved["head"]["sha"] = NEXT
+        with patch.object(self.api, "pr", return_value=moved):
+            self.assertEqual(self.controller.review(pull_at(HEAD, self.api), state, self.api.comments(1)), "clean")
+        self.assertNotIn("reviewed", state)
+
+    def test_digest_is_not_recorded_when_the_base_moves_mid_read(self):
+        state = {"opened_head": HEAD}
+        moved = copy.deepcopy(self.api.pull)
+        moved["base"]["sha"] = "d" * 40
+        with patch.object(self.api, "pr", return_value=moved):
+            self.assertEqual(self.controller.review(pull_at(HEAD, self.api), state, self.api.comments(1)), "clean")
+        self.assertNotIn("reviewed", state)
+
+    def test_same_head_re_review_refreshes_the_anchor(self):
+        state = {"opened_head": HEAD}
+        self.assertEqual(self.verdict(state), "clean")
+        state["requested"] = {"head": HEAD, "gate_id": 8, "id": 9, "at": "2026-10-10T10:01:00Z"}
+        self.assertEqual(self.verdict(state), "clean")
+        self.assertEqual(state["reviewed"]["requested"], state["requested"])
+        self.api.update_base()
+        self.assertEqual(self.verdict(state), "clean", "The latest clean activation carries")
+
+    def test_receipt_survives_a_failed_digest_lookup(self):
+        state = {"opened_head": HEAD}
+        with patch.object(self.api, "diff_digest", side_effect=RuntimeError("GitHub GET pulls/1/files")):
+            self.assertEqual(self.verdict(state), "clean")
+        self.assertIn("approved_summary", self.api.data)
+        self.assertNotIn("reviewed", state)
+
+    def test_reconcile_runs_final_validation_without_another_review_round(self):
+        self.controller.reconcile(1)
+        self.api.finish()
+        self.controller.reconcile(1)  # initial passed; clean review starts final
+        self.api.finish()
+        self.controller.reconcile(1)
+        self.assertEqual(self.api.gates[-1][1], "success")
+        self.api.update_base()
+        dispatched = len(self.api.started)
+        with patch("controller.time.sleep"):
+            self.controller.reconcile(1)
+        self.assertEqual(self.api.data["phase"], "final")
+        self.assertEqual(len(self.api.started), dispatched + 2, "Final validation reruns on the new head")
+        self.assertFalse([n for n in self.api.notices if "review" in str(n.get("body", ""))],
+                         "No Codex review request for an unchanged diff")
+        self.api.finish()
+        self.controller.reconcile(1)
+        self.assertEqual(self.api.gates[-1], (NEXT, "success", "Current review and final validation passed"))
+
+
+if __name__ == "__main__":
+    unittest.main()

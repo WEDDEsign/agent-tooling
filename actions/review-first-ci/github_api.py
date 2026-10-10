@@ -1,5 +1,6 @@
 """Small GitHub adapter; secrets stay in authorization headers, never output."""
 
+import hashlib
 import json
 import logging
 import os
@@ -84,6 +85,25 @@ class GitHub:
         if commit is None:
             raise RuntimeError("GitHub could not find the requested commit")
         return (commit.get("status") or {}).get("contexts", [])
+
+    def diff_digest(self, pr):
+        """Fingerprint of the PR's own change against its merge base, or None.
+
+        Exact patch text, hunk positions included: a base update that touches
+        anything near the PR's lines changes the digest, which only costs a
+        fresh review. Unlisted (3,000+) files, a patchless (binary or
+        oversized) file, or a head or base that moved while the files were
+        read never produce a digest: none can show the diff is unchanged.
+        """
+        files = self.pages(f"pulls/{int(pr['number'])}/files")
+        if len(files) != pr.get("changed_files") or any("patch" not in f for f in files):
+            return None
+        now = self.pr(pr["number"])
+        if now["head"]["sha"] != pr["head"]["sha"] or now["base"]["sha"] != pr["base"]["sha"]:
+            return None
+        entries = sorted([f["filename"], f.get("previous_filename") or "", f.get("status") or "",
+                          f["patch"]] for f in files)
+        return hashlib.sha256(json.dumps(entries).encode("utf-8")).hexdigest()
 
     def comments(self, number):
         return self.pages(f"issues/{number}/comments")

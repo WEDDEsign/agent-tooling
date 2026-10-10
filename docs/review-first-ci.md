@@ -39,6 +39,18 @@ Skipped jobs, failed retries, stale dispatches, and an old head's review are
 not successful validation. A new push invalidates final validation. If initial
 validation failed, the next push repeats initial validation.
 
+A clean review carries to a new head whose PR diff is unchanged — the usual
+case when the strict up-to-date rule makes an author bring in the base branch.
+The controller records a digest of the PR's files and patches with each clean
+review; a later head with the identical digest goes straight to final
+validation instead of spending another review round. The original review is
+re-evaluated live each time, so dismissal, summary edits or new findings still
+withdraw it. A fresh review is still needed after any later review request
+or newly armed gate, any Codex review or inline comment on the new head or an
+intervening one, a conflict resolution, a base change near the PR's lines, or a
+binary/oversized file whose patch GitHub omits. Final validation always reruns
+on the new head.
+
 `admit` and `verify-checkout` need read-only repository access. `reconcile`
 requires an installation token from a **dedicated GitHub App**, with
 Actions/checks/issues write and contents/pull-requests/statuses read. Pass its

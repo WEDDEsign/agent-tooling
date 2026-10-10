@@ -8,3 +8,6 @@ Thumbs.db
 
 # Node (if a plugin ever adds JS tooling)
 node_modules/
+
+# Python bytecode
+__pycache__/
