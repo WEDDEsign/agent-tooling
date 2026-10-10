@@ -1,0 +1,56 @@
+name: Review-first CI
+description: Coordinate initial and final validation without running PR code
+inputs:
+  operation:
+    description: admit, verify-checkout, or reconcile
+    required: true
+  token:
+    description: Repository GITHUB_TOKEN
+    required: true
+  review-token:
+    description: Human-identity token for the bare Codex review request
+    required: false
+  mode:
+    description: classic (default), pilot, or enabled
+    default: classic
+  config:
+    description: JSON mapping workflow filenames to their test job names
+    default: '{}'
+  pr-number:
+    default: ''
+  expected-head:
+    default: ''
+  expected-base:
+    default: ''
+  ticket:
+    default: ''
+  restore:
+    description: Recover existing PRs after switching the repository to classic
+    default: 'false'
+outputs:
+  run:
+    description: Whether this invocation may run the tests
+    value: ${{ steps.decide.outputs.run }}
+  full:
+    description: Whether path/test selection must be disabled
+    value: ${{ steps.decide.outputs.full }}
+  checkout-ref:
+    description: PR merge ref for controlled validation; empty for normal CI
+    value: ${{ steps.decide.outputs.checkout-ref }}
+runs:
+  using: composite
+  steps:
+    - id: decide
+      shell: bash
+      env:
+        RFC_OPERATION: ${{ inputs.operation }}
+        RFC_TOKEN: ${{ inputs.token }}
+        RFC_REVIEW_TOKEN: ${{ inputs.review-token }}
+        RFC_MODE: ${{ inputs.mode }}
+        RFC_CONFIG: ${{ inputs.config }}
+        RFC_PR: ${{ inputs.pr-number }}
+        RFC_HEAD: ${{ inputs.expected-head }}
+        RFC_BASE: ${{ inputs.expected-base }}
+        RFC_TICKET: ${{ inputs.ticket }}
+        RFC_RESTORE: ${{ inputs.restore }}
+      run: python3 "$GITHUB_ACTION_PATH/main.py"
