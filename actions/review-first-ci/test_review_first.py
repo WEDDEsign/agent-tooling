@@ -13,9 +13,10 @@ from github_api import GitHub
 
 HEAD, NEXT, BASE = "a" * 40, "b" * 40, "c" * 40
 REPO = "owner/project"
+APP = 987654
 RULES = [{"type": "required_status_checks", "parameters": {
     "strict_required_status_checks_policy": True,
-    "required_status_checks": [{"context": name, "integration_id": 15368}
+    "required_status_checks": [{"context": name, "integration_id": APP if name == GATE else 15368}
                                for name in [GATE, "backend", "frontend", "policy"]]}}]
 CONFIG = {"backend.yml": ["backend"], "frontend.yml": ["frontend"]}
 
@@ -24,7 +25,7 @@ def pull():
     return {"number": 1, "commits": 2, "state": "open", "draft": False,
             "created_at": "2026-10-10T10:00:00Z",
             "head": {"sha": HEAD, "ref": "codex/feature", "repo": {"full_name": REPO}},
-            "base": {"sha": BASE, "ref": "main"}, "labels": [{"name": "review-first-ci"}]}
+            "base": {"sha": BASE, "ref": "main", "repo": {"default_branch": "main"}}, "labels": [{"name": "review-first-ci"}]}
 
 
 def checks():
@@ -34,6 +35,7 @@ def checks():
 
 class FakeAPI:
     repo = REPO
+    app_id = APP
 
     def __init__(self):
         self.pull = pull()
@@ -55,7 +57,7 @@ class FakeAPI:
     def comments(self, _):
         return []
 
-    def state(self, _):
+    def state(self, *_):
         return copy.deepcopy(self.data), 5 if self.data else None
 
     def save(self, number, state, comment_id):
@@ -67,8 +69,8 @@ class FakeAPI:
         if add:
             self.pull["labels"].append({"name": label})
 
-    def gate(self, head, conclusion, text):
-        self.gates.append((head, conclusion, text))
+    def gate(self, pr, conclusion, text):
+        self.gates.append((pr["head"]["sha"], conclusion, text))
 
     def checks(self, _):
         return self.check_results
@@ -290,13 +292,13 @@ class FlowTests(unittest.TestCase):
 
 class PolicyTests(unittest.TestCase):
     def test_no_deferral_without_required_gate_and_strict_base(self):
-        self.assertTrue(protected(RULES))
+        self.assertTrue(protected(RULES, APP))
         rules = copy.deepcopy(RULES)
         rules[0]["parameters"]["strict_required_status_checks_policy"] = False
-        self.assertFalse(protected(rules))
+        self.assertFalse(protected(rules, APP))
         rules = copy.deepcopy(RULES)
         rules[0]["parameters"]["required_status_checks"][0]["integration_id"] = None
-        self.assertFalse(protected(rules))
+        self.assertFalse(protected(rules, APP))
 
     def test_both_authors_and_classic_default(self):
         pr = pull()
@@ -343,11 +345,6 @@ class PolicyTests(unittest.TestCase):
         summary["body"] = summary["body"].replace(HEAD[:7], NEXT[:7])
         self.assertEqual(verdict(), "missing")
 
-    def test_untrusted_state_comment_is_ignored(self):
-        comment = {"id": 1, "user": {"login": "someone"}, "performed_via_github_app": None,
-                   "body": MARKER + '\n```json\n{"version":1,"baseline":true}\n```'}
-        self.assertEqual(GitHub("unused", REPO).state([comment]), ({}, None))
-
     def test_withdrawn_approval_and_quoted_templates_are_not_clean(self):
         review = {"id": 1, "user": {"login": BOT}, "commit_id": HEAD,
                   "submitted_at": "2026-10-10T10:05:00Z", "state": "DISMISSED",
@@ -392,6 +389,18 @@ class PolicyTests(unittest.TestCase):
     def test_base_workflow_completion_reconciles_the_ticket_pr(self):
         event = {"workflow_run": {"head_sha": BASE, "event": "workflow_dispatch",
                  "display_title": "review-first-8-final-" + "a" * 32}}
+        with tempfile.NamedTemporaryFile(mode="w") as handle:
+            json.dump(event, handle)
+            handle.flush()
+            env = {"GITHUB_EVENT_PATH": handle.name, "RFC_OPERATION": "reconcile",
+                   "RFC_TOKEN": "unused", "RFC_PR": "", "RFC_CONFIG": "{}", "RFC_RESTORE": "false"}
+            with patch.dict(os.environ, env), patch("main.GitHub"), patch("main.Controller") as cls:
+                main()
+                cls.return_value.reconcile.assert_called_once_with(8, False)
+
+    def test_untrusted_review_notice_only_selects_a_pr_to_reconcile(self):
+        event = {"workflow_run": {"head_sha": NEXT, "event": "pull_request_review_comment",
+                 "display_title": "review-first-event-8", "conclusion": "success"}}
         with tempfile.NamedTemporaryFile(mode="w") as handle:
             json.dump(event, handle)
             handle.flush()

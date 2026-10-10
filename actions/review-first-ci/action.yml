@@ -5,8 +5,11 @@ inputs:
     description: admit, verify-checkout, or reconcile
     required: true
   token:
-    description: Repository GITHUB_TOKEN
+    description: Read-only GITHUB_TOKEN for admission; dedicated App installation token for reconcile
     required: true
+  controller-app-id:
+    description: Dedicated controller GitHub App ID, never the shared GitHub Actions App
+    default: '0'
   review-token:
     description: Human-identity token for the bare Codex review request
     required: false
@@ -45,6 +48,7 @@ runs:
       env:
         RFC_OPERATION: ${{ inputs.operation }}
         RFC_TOKEN: ${{ inputs.token }}
+        RFC_APP_ID: ${{ inputs.controller-app-id }}
         RFC_REVIEW_TOKEN: ${{ inputs.review-token }}
         RFC_MODE: ${{ inputs.mode }}
         RFC_CONFIG: ${{ inputs.config }}

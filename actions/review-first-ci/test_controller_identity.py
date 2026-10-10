@@ -1,0 +1,163 @@
+"""Exercise the actual App-owned state adapter, including the reported bypass."""
+import copy
+import json
+import unittest
+from unittest.mock import patch
+
+from github_api import GitHub
+from policy import GATE, MARKER, protected, eligible, current_review, BOT
+from test_review_first import APP, BASE, CONFIG, HEAD, NEXT, REPO, RULES, FakeAPI, Harness, pull
+
+
+class AppStore(FakeAPI, GitHub):
+    state = GitHub.state
+    save = GitHub.save
+    gate = GitHub.gate
+    checkpoint = GitHub.checkpoint
+    decode_state = GitHub.decode_state
+    owned = GitHub.owned
+    write_check = GitHub.write_check
+
+    def __init__(self):
+        FakeAPI.__init__(self)
+        self.records = {}
+        self.discussion = []
+
+    def checks(self, head):
+        return self.check_results + [copy.deepcopy(c) for c in self.records.values() if c['head_sha'] == head]
+
+    def comments(self, _):
+        return copy.deepcopy(self.discussion)
+
+    def request(self, path, method='GET', data=None):
+        if path == 'check-runs':
+            check = {**copy.deepcopy(data), 'id': len(self.records) + 100, 'app': {'id': APP}}
+            self.records[check['id']] = check
+            return copy.deepcopy(check)
+        if path.startswith('check-runs/'):
+            check = self.records[int(path.split('/')[1])]
+            if method == 'PATCH':
+                check.update(copy.deepcopy(data))
+            return copy.deepcopy(check)
+        if path == 'issues/1/comments':
+            self.discussion.append({'id': len(self.discussion) + 1, **copy.deepcopy(data)})
+            return {'id': len(self.discussion)}
+        return FakeAPI.request(self, path, method, data)
+
+
+class IdentityTests(unittest.TestCase):
+    def test_shared_actions_and_missing_app_cannot_enable_deferral(self):
+        for app in (0, 15368, None):
+            rules = copy.deepcopy(RULES)
+            rules[0]['parameters']['required_status_checks'][0]['integration_id'] = app
+            self.assertFalse(protected(rules, app))
+        self.assertFalse(protected(RULES, APP + 1))
+        self.assertTrue(protected(RULES, APP))
+
+    def test_check_write_must_authenticate_as_the_configured_app(self):
+        api = GitHub('unused', REPO, APP)
+        check = {'id': 10, 'app': {'id': 15368}, 'name': GATE,
+                 'external_id': f'review-first:{REPO}:1'}
+        with patch.object(api, 'checks', return_value=[]), patch.object(api, 'request', return_value=check):
+            with self.assertRaisesRegex(RuntimeError, 'owned by the configured App'):
+                api.gate(pull(), None, 'Pending')
+            check['app']['id'] = APP
+            api.gate(pull(), None, 'Pending')
+
+    def test_pr_cannot_choose_an_unprotected_validation_branch(self):
+        pr = pull()
+        pr['base']['ref'] = 'untrusted-feature'
+        self.assertFalse(eligible(pr, REPO, 'pilot'))
+        api = FakeAPI()
+        api.pull = pr
+        with self.assertRaisesRegex(RuntimeError, 'default branch'):
+            Harness(api, None, 'pilot', CONFIG).start(pr, {}, None, 'final')
+
+    def test_forged_actions_comment_cannot_reuse_initial_runs_for_final_gate(self):
+        api = AppStore()
+        controller = Harness(api, None, 'pilot', CONFIG)
+        controller.reconcile(1)
+        api.finish()
+        controller.reconcile(1)
+        state, _ = api.state(api.pull, api.comments(1))
+        self.assertTrue(state['baseline'])
+        forged = {**state, 'phase': 'final', 'head': NEXT}
+        api.discussion.append({'id': 999, 'user': {'login': 'github-actions[bot]'},
+            'performed_via_github_app': {'id': 15368},
+            'body': '<!-- review-first-ci:v1 -->\n```json\n' + json.dumps(forged) + '\n```'})
+        # Even copying the new check format cannot impersonate the App.
+        api.records[999] = {'id': 999, 'name': GATE, 'app': {'id': 15368}, 'head_sha': NEXT,
+            'external_id': f'review-first:{REPO}:1', 'output': {'text': json.dumps(forged)}}
+        api.discussion.append({'id': 1000, 'body': f'{MARKER}\ncheck: 999\n'})
+        api.pull['head']['sha'] = NEXT
+        controller.verdict = 'clean'
+        controller.reconcile(1)
+        state, check_id = api.state(api.pull, api.comments(1))
+        self.assertEqual(state['phase'], 'final')
+        self.assertNotEqual(state['ticket'], forged['ticket'])
+        self.assertEqual(len(api.started), 4, 'Two genuine final workers are dispatched')
+        self.assertEqual(api.records[check_id]['status'], 'in_progress')
+        api.finish()
+        controller.reconcile(1)
+        self.assertEqual(api.records[check_id]['conclusion'], 'success')
+
+    def test_current_checkpoint_wins_over_replayed_pointers_and_json(self):
+        api = AppStore()
+        original = {'version': 2, 'head': HEAD, 'base': BASE, 'phase': 'review', 'baseline': True}
+        old_id = api.save(1, original, None)
+        current = {**original, 'head': NEXT, 'phase': 'final', 'ticket': 'new-ticket'}
+        new_id = api.save(1, current, None)
+        api.pull['head']['sha'] = NEXT
+        api.discussion = [{'body': f'{MARKER}\ncheck: {old_id}\n```json\n{{"phase":"final"}}\n```'}]
+        self.assertEqual(api.state(api.pull, api.discussion), (current, new_id))
+
+    def test_state_cannot_be_imported_from_another_pr_or_app(self):
+        api = AppStore()
+        state = {'version': 2, 'head': HEAD, 'phase': 'final'}
+        check_id = api.save(2, state, None)
+        api.discussion = [{'body': f'{MARKER}\ncheck: {check_id}\n'}]
+        self.assertEqual(api.state(api.pull, api.discussion), ({}, None))
+        api.records[check_id]['external_id'] = f'review-first:{REPO}:1'
+        api.records[check_id]['app']['id'] = 15368
+        self.assertEqual(api.state(api.pull, api.discussion), ({}, None))
+
+    def test_notification_bookkeeping_preserves_failed_gate(self):
+        api = AppStore()
+        controller = Harness(api, None, 'pilot', CONFIG)
+        controller.reconcile(1)
+        api.finish('failure')
+        controller.reconcile(1)
+        state, check_id = api.state(api.pull, api.comments(1))
+        self.assertEqual(state['failure_reported'], state['ticket'])
+        self.assertEqual(api.records[check_id]['conclusion'], 'failure')
+        self.assertEqual(api.records[check_id]['status'], 'completed')
+
+    def test_app_state_survives_classic_restore(self):
+        api = AppStore()
+        controller = Harness(api, None, 'pilot', CONFIG)
+        controller.reconcile(1)
+        api.finish()
+        controller.reconcile(1)
+        controller.mode = 'classic'
+        controller.reconcile(1, restore=True)
+        state, check_id = api.state(api.pull, api.comments(1))
+        self.assertEqual(state['phase'], 'classic')
+        self.assertEqual(api.records[check_id]['status'], 'in_progress')
+        api.finish()
+        controller.reconcile(1)
+        self.assertEqual(api.records[check_id]['conclusion'], 'success')
+
+    def test_inline_edit_invalidates_a_clean_review_until_new_activation(self):
+        review = {'id': 3, 'user': {'login': BOT}, 'commit_id': HEAD,
+                  'submitted_at': '2026-10-10T10:10:00Z', 'state': 'APPROVED', 'body': ''}
+        inline = {'user': {'login': BOT}, 'commit_id': NEXT, 'created_at': '2026-10-10T10:01:00Z',
+                  'updated_at': '2026-10-10T10:11:00Z'}
+        state = {'opened_head': HEAD}
+        self.assertEqual(current_review(pull(), state, [], [review], [inline], []), 'findings')
+        state['requested'] = {'head': HEAD, 'at': '2026-10-10T10:12:00Z'}
+        review['submitted_at'] = '2026-10-10T10:13:00Z'
+        self.assertEqual(current_review(pull(), state, [], [review], [inline], []), 'clean')
+
+
+if __name__ == '__main__':
+    unittest.main()

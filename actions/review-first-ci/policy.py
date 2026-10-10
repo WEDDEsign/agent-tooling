@@ -7,7 +7,15 @@ GATE = "merge-validation"
 ACTIVE = "review-first-ci-active"
 OPT_IN = "review-first-ci"
 REPING = "awaiting-codex-reping"
-MARKER = "<!-- review-first-ci:v1 -->"
+MARKER = "<!-- review-first-ci:v2 -->"
+
+
+def dedicated_app(app_id):
+    return isinstance(app_id, int) and app_id > 0 and app_id != 15368
+
+
+def trusted_base(pr):
+    return pr["base"]["ref"] == pr["base"].get("repo", {}).get("default_branch")
 
 
 def labels(pr):
@@ -15,7 +23,7 @@ def labels(pr):
 
 
 def eligible(pr, repo, mode):
-    if pr["state"] != "open" or pr.get("draft"):
+    if pr["state"] != "open" or pr.get("draft") or not trusted_base(pr):
         return False
     if (pr["head"].get("repo") or {}).get("full_name") != repo or "ci-always" in labels(pr):
         return False
@@ -33,11 +41,11 @@ def required_checks(rules):
             for check in rule["parameters"]["required_status_checks"]}
 
 
-def protected(rules):
+def protected(rules, app_id):
     """Never defer until GitHub itself enforces the gate and current base."""
-    return any(rule["type"] == "required_status_checks"
+    return dedicated_app(app_id) and any(rule["type"] == "required_status_checks"
                and rule["parameters"].get("strict_required_status_checks_policy")
-               and any(c["context"] == GATE and c.get("integration_id") == 15368
+               and any(c["context"] == GATE and c.get("integration_id") == app_id
                        for c in rule["parameters"]["required_status_checks"])
                for rule in rules)
 
@@ -69,10 +77,18 @@ def current_review(pr, state, comments, reviews, inline, reactions):
         since = pr["created_at"]
     else:
         return "missing"
+    # An edited old inline finding is new feedback even if its thread remains
+    # resolved. A new review activation may supersede it after author triage.
+    findings = [c for c in inline if c["user"]["login"] == BOT
+                and (c.get("commit_id") == head or c.get("updated_at", "") > c.get("created_at", ""))
+                and max(c.get("created_at", ""), c.get("updated_at", "")) >= since]
     current = [r for r in reviews if r["user"]["login"] == BOT
                and r.get("commit_id") == head and r.get("submitted_at", "") >= since]
     if current:
         latest = max(current, key=lambda r: r["id"])
+        if any(max(c.get("created_at", ""), c.get("updated_at", "")) >= latest["submitted_at"]
+               for c in findings):
+            return "findings"
         if latest["state"] == "DISMISSED":
             return "findings"
         # The established terminal verdict is a standalone line, not a quoted
@@ -102,8 +118,6 @@ def current_review(pr, state, comments, reviews, inline, reactions):
         return "running"
     if "**Completed**" not in row:
         return "missing"
-    findings = any(c["user"]["login"] == BOT and c.get("commit_id") == head
-                   and c.get("created_at", "") >= since for c in inline)
     thumbs_up = any(r["user"]["login"] == BOT and r["content"] == "+1"
                     and r.get("created_at", "") >= max(since, summary["updated_at"])
                     for r in reactions)

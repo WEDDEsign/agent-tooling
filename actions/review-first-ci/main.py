@@ -7,7 +7,7 @@ import subprocess
 
 from controller import Controller
 from github_api import GitHub
-from policy import eligible, protected
+from policy import eligible, protected, trusted_base
 
 
 def output(**values):
@@ -25,8 +25,8 @@ def admit(api, event, mode):
         if not all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (head, base)):
             raise RuntimeError("Validation requires full immutable commit IDs")
         pr = api.pr(number)
-        state, _ = api.state(api.comments(number))
-        if (pr["state"] != "open" or pr["head"]["sha"] != head or pr["base"]["sha"] != base
+        state, _ = api.state(pr, api.comments(number))
+        if (not trusted_base(pr) or pr["state"] != "open" or pr["head"]["sha"] != head or pr["base"]["sha"] != base
                 or os.environ["GITHUB_SHA"] != base or state.get("ticket") != ticket
                 or state.get("head") != head or state.get("base") != base
                 or state.get("phase") not in {"initial", "final", "classic"}):
@@ -39,7 +39,7 @@ def admit(api, event, mode):
         return
     try:
         pr = api.pr(event["number"])
-        defer = eligible(pr, api.repo, mode) and protected(api.rules(pr))
+        defer = eligible(pr, api.repo, mode) and protected(api.rules(pr), api.app_id)
     except RuntimeError as error:
         print(f"Cannot establish pilot prerequisites; running normal CI: {error}")
         defer = False
@@ -55,7 +55,7 @@ def verify_checkout():
 
 
 def main():
-    api = GitHub(os.environ["RFC_TOKEN"])
+    api = GitHub(os.environ["RFC_TOKEN"], app_id=os.environ.get("RFC_APP_ID", "0"))
     with open(os.environ["GITHUB_EVENT_PATH"]) as handle:
         event = json.load(handle)
     operation = os.environ["RFC_OPERATION"]
@@ -78,7 +78,11 @@ def main():
             run = event["workflow_run"]
             ticket = re.fullmatch(r"review-first-(\d+)-(?:initial|final|classic)-[0-9a-f]{32}",
                                   run.get("display_title", ""))
-            if ticket and run.get("event") == "workflow_dispatch":
+            notice = re.fullmatch(r"review-first-event-(\d+)", run.get("display_title", ""))
+            if notice:
+                # Untrusted notification selects only a PR to re-read, never state or code.
+                numbers = [int(notice[1])]
+            elif ticket and run.get("event") == "workflow_dispatch":
                 # Dispatched workflow code belongs to base; its commit is not
                 # the PR head. The ticket selects which live state to reconcile.
                 numbers = [int(ticket[1])]

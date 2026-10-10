@@ -2,18 +2,20 @@
 
 import json
 import os
+import re
 from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-from policy import MARKER
+from policy import GATE, MARKER, dedicated_app
 
 
 class GitHub:
-    def __init__(self, token, repo=None):
+    def __init__(self, token, repo=None, app_id=0):
         self.token = token
         self.repo = repo or os.environ["GITHUB_REPOSITORY"]
+        self.app_id = int(app_id or 0)
 
     def request(self, path, method="GET", data=None):
         raw = None if data is None else json.dumps(data).encode()
@@ -79,26 +81,54 @@ class GitHub:
     def comments(self, number):
         return self.pages(f"issues/{number}/comments")
 
-    def state(self, comments):
-        found = [c for c in comments if c["user"]["login"] == "github-actions[bot]"
-                 and (c.get("performed_via_github_app") or {}).get("id") == 15368
-                 and c.get("body", "").startswith(MARKER)]
-        if not found:
-            return {}, None
-        latest = max(found, key=lambda c: c["id"])
-        state = json.loads(latest["body"].split("```json\n", 1)[1].split("\n```", 1)[0])
-        if state.get("version") != 1:
-            raise RuntimeError("Unknown review-first state version")
-        return state, latest["id"]
+    def owned(self, check, number):
+        return (dedicated_app(self.app_id) and check.get("app", {}).get("id") == self.app_id
+                and check.get("name") == GATE
+                and check.get("external_id") == f"review-first:{self.repo}:{number}")
 
-    def save(self, number, state, comment_id):
-        body = (MARKER + "\nReview-first CI: **" + state["phase"] + "**. "
-                "The required merge-validation check decides whether validation is complete.\n\n"
-                "<details><summary>Controller state</summary>\n\n```json\n"
-                + json.dumps(state, sort_keys=True) + "\n```\n</details>")
-        path = f"issues/comments/{comment_id}" if comment_id else f"issues/{number}/comments"
-        response = self.request(path, "PATCH" if comment_id else "POST", {"body": body})
-        return response["id"]
+    def checkpoint(self, head, number):
+        return max((c for c in self.checks(head) if self.owned(c, number)),
+                   key=lambda c: c["id"], default=None)
+
+    def decode_state(self, check, number):
+        if not self.owned(check, number) or not check.get("output", {}).get("text"):
+            return {}
+        state = json.loads(check["output"]["text"])
+        if state.get("version") != 2 or state.get("head") != check["head_sha"]:
+            raise RuntimeError("Invalid App-owned controller state")
+        return state
+
+    def state(self, pr, comments):
+        current = self.checkpoint(pr["head"]["sha"], pr["number"])
+        if current:
+            # Always prefer the authoritative current-head record, including an
+            # empty one. A copied old pointer cannot roll its state back.
+            return self.decode_state(current, pr["number"]), current["id"]
+        # Comments only locate previous-head checkpoints across pushes. They
+        # contain no trusted state. Read each referenced check from GitHub and
+        # authenticate its App AND repository/PR binding before using it.
+        ids = set()
+        for comment in comments:
+            match = re.match(re.escape(MARKER) + r"\ncheck: (\d+)\n", comment.get("body", ""))
+            if match:
+                ids.add(int(match[1]))
+        for check_id in sorted(ids, reverse=True):
+            check = self.request(f"check-runs/{check_id}")
+            state = self.decode_state(check, pr["number"])
+            if state:
+                return state, None  # Save a new head's checkpoint, never edit the old one.
+        return {}, None
+
+    def save(self, number, state, checkpoint_id):
+        check_id = self.write_check(number, state["head"], None,
+                                   "Review-first CI: " + state["phase"], state)
+        if checkpoint_id != check_id:
+            self.request(f"issues/{number}/comments", "POST", {"body":
+                f"{MARKER}\ncheck: {check_id}\n"
+                f"Controller state for `{state['head']}` lives in the dedicated App's "
+                f"[merge-validation check](https://github.com/{self.repo}/runs/{check_id}). "
+                "This comment is only a pointer; its contents cannot certify validation."})
+        return check_id
 
     def label(self, number, name, add):
         if add:
@@ -106,18 +136,33 @@ class GitHub:
         else:
             self.request(f"issues/{number}/labels/{quote(name, safe='')}", "DELETE")
 
-    def gate(self, head, conclusion, text):
-        existing = [c for c in self.checks(head) if c["name"] == "merge-validation"
-                    and c.get("app", {}).get("id") == 15368]
-        payload = {"name": "merge-validation", "status": "completed" if conclusion else "in_progress",
+    def gate(self, pr, conclusion, text):
+        self.write_check(pr["number"], pr["head"]["sha"], conclusion, text)
+
+    def write_check(self, number, head, conclusion, text, state=None):
+        if not dedicated_app(self.app_id):
+            raise RuntimeError("A dedicated controller App ID is required")
+        existing = self.checkpoint(head, number)
+        if state is not None and existing and existing.get("status") == "completed":
+            # Recording notification delivery must not turn a failed gate back
+            # into a pending one. Only gate() changes the validation verdict.
+            conclusion = existing.get("conclusion")
+        payload = {"name": GATE, "status": "completed" if conclusion else "in_progress",
+                   "external_id": f"review-first:{self.repo}:{number}",
                    "output": {"title": text, "summary": text}}
+        if state is not None:
+            payload["output"]["text"] = json.dumps(state, sort_keys=True)
+        elif existing and existing.get("output", {}).get("text"):
+            payload["output"]["text"] = existing["output"]["text"]
         if conclusion:
             payload["conclusion"] = conclusion
         if existing:
-            check = max(existing, key=lambda c: c["id"])
-            self.request(f"check-runs/{check['id']}", "PATCH", payload)
+            response = self.request(f"check-runs/{existing['id']}", "PATCH", payload)
         else:
-            self.request("check-runs", "POST", {**payload, "head_sha": head})
+            response = self.request("check-runs", "POST", {**payload, "head_sha": head})
+        if not self.owned(response, number):
+            raise RuntimeError("GitHub did not write a check owned by the configured App")
+        return response["id"]
 
     def runs(self, workflow, head):
         return self.pages(f"actions/workflows/{quote(workflow, safe='')}/runs?"
