@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 
 from github_api import GitHub
-from policy import (ACTIVE, GATE, REPING, checks_pass, current_review, eligible,
+from policy import (ACTIVE, BOT, GATE, REPING, checks_pass, current_review, eligible,
                     labels, protected, required_checks, run_result, trusted_base)
 
 
@@ -35,12 +35,22 @@ class Controller:
         n = pr["number"]
         args = (pr, state, comments, self.api.pages(f"pulls/{n}/reviews"),
                 self.api.pages(f"pulls/{n}/comments"))
-        verdict = current_review(*args, self.api.pages(f"issues/{n}/reactions"))
+        summaries = [c for c in comments if c["user"]["login"] == BOT
+                     and c.get("body", "").startswith("<!-- codex-pull-request-review-summary -->")]
+        summary = max(summaries, key=lambda c: c["id"], default=None)
+
+        def reactions():
+            found = self.api.pages(f"issues/{n}/reactions")
+            if summary:
+                found += self.api.pages(f"issues/comments/{summary['id']}/reactions")
+            return found
+
+        verdict = current_review(*args, reactions())
         # The summary edit precedes the reaction by a few seconds. Reactions
         # have no Actions event; this short retry avoids an hourly recovery wait.
         if verdict == "finishing":
             time.sleep(10)
-            verdict = current_review(*args, self.api.pages(f"issues/{n}/reactions"))
+            verdict = current_review(*args, reactions())
         return verdict
 
     def start(self, pr, state, checkpoint_id, phase):
@@ -120,7 +130,7 @@ class Controller:
         state.pop("request_intent", None)
         self.api.save(pr["number"], state, checkpoint_id)
 
-    def recover_request(self, pr, state, comments, checkpoint_id):
+    def recover_request(self, pr, state, comments, checkpoint_id, restore_gate=False):
         intent = state.get("request_intent", {})
         if intent.get("head") != pr["head"]["sha"]:
             return False
@@ -128,6 +138,12 @@ class Controller:
                   and c["created_at"] >= intent["at"]
                   and c.get("author_association") in {"OWNER", "MEMBER", "COLLABORATOR"}]
         if not landed:
+            if restore_gate and REPING not in labels(pr) and self.unchanged(pr):
+                # A previous runner may have stopped after claiming the label.
+                # Serialized reconciliation proves no delivery is still active;
+                # restore the durable gate rather than stranding that intent.
+                self.api.label(pr["number"], REPING, True)
+                pr["labels"].append({"name": REPING})
             return False
         comment = min(landed, key=lambda c: c["id"])
         state["requested"] = {"head": intent["head"], "gate_id": intent["gate_id"],
@@ -224,7 +240,7 @@ class Controller:
                 self.complete(pr, "Current review and final validation passed")
                 return
         if state["phase"] == "review":
-            self.recover_request(pr, state, comments, checkpoint_id)
+            self.recover_request(pr, state, comments, checkpoint_id, restore_gate=True)
             verdict = self.review(pr, state, comments)
             if verdict == "clean":
                 self.start(pr, state, checkpoint_id, "final")

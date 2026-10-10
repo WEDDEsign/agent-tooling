@@ -4,6 +4,7 @@ import json
 import unittest
 from unittest.mock import patch
 
+from controller import Controller
 from github_api import GitHub
 from policy import GATE, MARKER, protected, eligible, current_review, BOT
 from test_review_first import APP, BASE, CONFIG, HEAD, NEXT, REPO, RULES, FakeAPI, Harness, pull
@@ -157,6 +158,36 @@ class IdentityTests(unittest.TestCase):
         state['requested'] = {'head': HEAD, 'at': '2026-10-10T10:12:00Z'}
         review['submitted_at'] = '2026-10-10T10:13:00Z'
         self.assertEqual(current_review(pull(), state, [], [review], [inline], []), 'clean')
+
+    def test_clean_reaction_on_summary_comment_starts_validation(self):
+        api = FakeAPI()
+        summary = {'id': 40, 'user': {'login': BOT}, 'updated_at': '2026-10-10T10:05:00Z',
+                   'body': '<!-- codex-pull-request-review-summary -->\n'
+                           f'| **Code Review** | **Completed** | `{HEAD[:7]}` | PR opened |'}
+        reaction = {'user': {'login': BOT}, 'content': '+1', 'created_at': '2026-10-10T10:05:01Z'}
+        def pages(path, key=None):
+            return [reaction] if path == 'issues/comments/40/reactions' else []
+        with patch.object(api, 'pages', side_effect=pages) as calls:
+            controller = Controller(api, None, 'pilot', CONFIG)
+            self.assertEqual(controller.review(pull(), {'opened_head': HEAD}, [summary]), 'clean')
+            self.assertIn(('issues/comments/40/reactions',), [c.args for c in calls.call_args_list])
+
+    def test_runner_interruption_after_claim_recovers_without_a_new_push(self):
+        api = FakeAPI()
+        controller = Harness(api, None, 'pilot', CONFIG)
+        controller.reconcile(1)
+        api.finish()
+        controller.reconcile(1)
+        api.data['request_intent'] = {'head': HEAD, 'gate_id': 10, 'at': '2026-10-10T10:05:00Z'}
+        api.events = [{'id': 11, 'event': 'labeled', 'label': {'name': 'awaiting-codex-reping'}}]
+        controller.verdict = 'missing'
+        controller.reviewer = api
+        controller.reconcile(1)
+        self.assertEqual(len(api.notices), 1)
+        self.assertNotIn('request_intent', api.data)
+        self.assertEqual(api.data['requested']['head'], HEAD)
+        controller.reconcile(1)
+        self.assertEqual(len(api.notices), 1, 'Recovery must not duplicate a delivered request')
 
 
 if __name__ == '__main__':
