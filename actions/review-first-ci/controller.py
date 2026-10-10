@@ -54,6 +54,7 @@ class Controller:
             time.sleep(10)
             found = reactions()
             verdict = current_review(*args, found)
+        changed = False
         if (verdict == "clean" and summary
                 and current_review(pr, state, comments, [], args[4], found) == "clean"):
             receipt = summary_receipt(pr, state, summary)
@@ -62,8 +63,45 @@ class Controller:
                 # approval switch. Persist the authenticated result. Review
                 # changes, findings and summary edits/deletion still invalidate it.
                 state["approved_summary"] = receipt
-                self.api.save(n, state, checkpoint_id)
+                changed = True
+        if verdict == "clean" and (state.get("reviewed") or {}).get("head") != pr["head"]["sha"]:
+            diff = self.api.diff_digest(pr)
+            if diff:
+                # Everything needed to re-check this review later, plus the PR
+                # diff it covered, so a base update can carry it (carried()).
+                state["reviewed"] = {"head": pr["head"]["sha"], "diff": diff,
+                                     "requested": state.get("requested", {}),
+                                     "opened_head": state.get("opened_head"),
+                                     "approved_summary": state.get("approved_summary")}
+                changed = True
+        if changed:
+            self.api.save(n, state, checkpoint_id)
+        if verdict == "missing" and self.carried(pr, state, *args[2:], found):
+            return "clean"
         return verdict
+
+    def carried(self, pr, state, comments, reviews, inline, reactions):
+        """A clean review still covers a new head whose PR diff is unchanged.
+
+        Bringing in the base branch moves the head without changing what the
+        PR does. Under the strict up-to-date rule every merge to the base does
+        that to every open PR, and re-reviewing an identical diff spends a Codex
+        round for nothing. Final validation still runs on the new head.
+        """
+        reviewed = state.get("reviewed") or {}
+        head = pr["head"]["sha"]
+        if not reviewed.get("diff") or reviewed.get("head") == head:
+            return False
+        if any(codex_author(item) and item.get("commit_id") == head for item in [*reviews, *inline]):
+            return False  # Codex has spoken on this head; its own verdict governs.
+        original = {**pr, "head": {**pr["head"], "sha": reviewed["head"]}}
+        prior = {"requested": reviewed.get("requested") or {}, "opened_head": reviewed.get("opened_head"),
+                 "approved_summary": reviewed.get("approved_summary")}
+        # Re-evaluate the original review live: dismissal, summary edits and
+        # later findings withdraw it here exactly as they would on its own head.
+        if current_review(original, prior, comments, reviews, inline, reactions) != "clean":
+            return False
+        return self.api.diff_digest(pr) == reviewed["diff"]
 
     def start(self, pr, state, checkpoint_id, phase):
         if not trusted_base(pr):

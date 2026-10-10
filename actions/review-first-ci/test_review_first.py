@@ -48,6 +48,7 @@ class FakeAPI:
         self.events = []
         self.duplicate_pr = False
         self.check_results = checks()
+        self.files = []
 
     def pr(self, _):
         return copy.deepcopy(self.pull)
@@ -98,7 +99,12 @@ class FakeAPI:
     def runs(self, workflow, head):
         return [copy.deepcopy(r) for r in self.jobs.get(workflow, []) if r["head_sha"] == head]
 
+    def diff_digest(self, pr):
+        return GitHub.diff_digest(self, pr)
+
     def pages(self, path, key=None):
+        if path.endswith('/files'):
+            return copy.deepcopy(self.files)
         if path.startswith('commits/'):
             return [self.pr(1)] + ([{**self.pr(1), 'number': 2}] if self.duplicate_pr else [])
         if path.endswith('/events'):
