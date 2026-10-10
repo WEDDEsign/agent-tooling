@@ -17,7 +17,10 @@ review are successful. The controller never merges.
 The consumer supplies a JSON mapping of workflow filenames to test job names.
 Each worker accepts `pr_number`, `expected_head`, `expected_base`, and `ticket`
 as workflow-dispatch inputs and uses `review-first-TICKET` as its run name.
-Admission verifies the request against controller state; the worker checks out
+Dispatch uses the target base branch's trusted workflow code, and admission
+requires its `GITHUB_SHA` to match the requested base. A base advance makes
+that dispatch stale. Admission verifies the request against controller state;
+the worker checks out
 the PR merge ref and verifies both parents before running any project code.
 Skipped jobs, failed retries, stale dispatches, and an old head's review are
 not successful validation. A new push invalidates final validation. If initial
@@ -52,8 +55,8 @@ controller refuses new requests at round six; narrower repository caps still
 apply to the author.
 
 Codex's authenticated current-head completed summary plus a fresh thumbs-up
-and no inline findings is a clean result. A submitted approval or fixed
-no-major-issues review on that head also qualifies. No template-driven retry
+and no inline findings is a clean result. A submitted approval, standalone
+`APPROVED` verdict, or fixed no-major-issues review on that head also qualifies. No template-driven retry
 is needed. The summary's edit can precede its reaction; reconciliation gives
 that reaction a short opportunity to arrive, then leaves validation pending.
 

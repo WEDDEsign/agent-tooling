@@ -28,7 +28,7 @@ def eligible(pr, repo, mode):
 
 
 def required_checks(rules):
-    return {check["context"] for rule in rules
+    return {(check["context"], check.get("integration_id")) for rule in rules
             if rule["type"] == "required_status_checks"
             for check in rule["parameters"]["required_status_checks"]}
 
@@ -43,15 +43,13 @@ def protected(rules):
 
 
 def checks_pass(checks, required):
-    latest = {}
-    for check in checks:
-        # Required workers and our gate are emitted by GitHub Actions.
-        if check.get("app", {}).get("id") != 15368:
-            continue
-        if check["id"] > latest.get(check["name"], {}).get("id", -1):
-            latest[check["name"]] = check
-    return all(latest.get(name, {}).get("status") == "completed"
-               and latest[name].get("conclusion") == "success" for name in required)
+    for name, source in required:
+        candidates = [check for check in checks if check["name"] == name
+                      and (source in {None, -1} or check.get("app", {}).get("id") == source)]
+        latest = max(candidates, key=lambda c: c["id"], default={})
+        if latest.get("status") != "completed" or latest.get("conclusion") != "success":
+            return False
+    return True
 
 
 def current_review(pr, state, comments, reviews, inline, reactions):
@@ -68,7 +66,13 @@ def current_review(pr, state, comments, reviews, inline, reactions):
                and r.get("commit_id") == head and r.get("submitted_at", "") >= since]
     if current:
         latest = max(current, key=lambda r: r["id"])
-        if latest["state"] in {"DISMISSED", "CHANGES_REQUESTED"}:
+        if latest["state"] == "DISMISSED":
+            return "findings"
+        # The established terminal verdict is a standalone line, not a quoted
+        # token in a finding. It also appears in COMMENTED/CHANGES_REQUESTED.
+        if re.search(r"(?m)^APPROVED\s*$", latest.get("body", "")):
+            return "clean"
+        if latest["state"] == "CHANGES_REQUESTED":
             return "findings"
         if latest["state"] == "APPROVED" or latest.get("body", "").lstrip().lower().startswith(
                 "codex review: didn't find any major issues"):

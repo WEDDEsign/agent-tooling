@@ -6,9 +6,9 @@ import unittest
 from unittest.mock import patch
 
 from controller import Controller
-from main import admit, verify_checkout
+from main import admit, main, verify_checkout
 from policy import (ACTIVE, BOT, GATE, MARKER, checks_pass, current_review,
-                    eligible, protected, run_result)
+                    eligible, protected, required_checks, run_result)
 from github_api import GitHub
 
 HEAD, NEXT, BASE = "a" * 40, "b" * 40, "c" * 40
@@ -99,7 +99,7 @@ class FakeAPI:
             if any(r["display_title"] == "review-first-" + ticket for r in self.jobs.get(workflow, [])):
                 continue
             run = {"id": sum(map(len, self.jobs.values())) + 20, "workflow": workflow,
-                   "display_title": "review-first-" + ticket, "head_sha": payload["inputs"]["expected_head"],
+                   "display_title": "review-first-" + ticket, "head_sha": payload["inputs"]["expected_base"],
                    "status": "completed", "conclusion": conclusion, "run_attempt": 1}
             if job_result:
                 run["job_result"] = job_result
@@ -151,6 +151,16 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(len(self.api.started), 4)
         self.assertEqual(self.api.data["phase"], "initial")
 
+    def test_only_trusted_base_runs_can_validate_a_ticket(self):
+        self.controller.reconcile(1)
+        self.assertTrue(all(payload["ref"] == "main" for _, payload in self.api.started))
+        self.api.finish()
+        for runs in self.api.jobs.values():
+            runs[0]["head_sha"] = HEAD  # A PR workflow with identical names/ticket.
+        self.assertEqual(self.controller.result(self.api.data), "pending")
+        self.controller.reconcile(1)
+        self.assertFalse(self.api.data["baseline"])
+
     def test_skipped_test_jobs_never_validate(self):
         self.controller.reconcile(1)
         self.api.finish(job_result="skipped")
@@ -180,6 +190,9 @@ class FlowTests(unittest.TestCase):
 
     def test_rollback_dispatches_tests_for_existing_pilot(self):
         self.initial()
+        for check in self.api.check_results:
+            if check["name"] in {"backend", "frontend"}:
+                check["conclusion"] = "skipped"
         self.controller.mode = "classic"
         self.controller.reconcile(1, restore=True)
         self.assertEqual(self.api.data["phase"], "classic")
@@ -256,7 +269,21 @@ class PolicyTests(unittest.TestCase):
     def test_latest_failed_attempt_not_masked_by_old_success(self):
         current = checks()
         current.append({**current[0], "id": 50, "conclusion": "failure"})
-        self.assertFalse(checks_pass(current, {"backend"}))
+        self.assertFalse(checks_pass(current, {("backend", 15368)}))
+
+    def test_required_integration_is_honored_without_assuming_actions(self):
+        rules = copy.deepcopy(RULES)
+        rules[0]["parameters"]["required_status_checks"] = [
+            {"context": "coverage", "integration_id": 42}, {"context": "policy"}]
+        required = required_checks(rules)
+        current = checks() + [{"id": 20, "name": "coverage", "app": {"id": 42},
+                               "status": "completed", "conclusion": "success"}]
+        self.assertTrue(checks_pass(current, required))
+        current.append({**current[-1], "id": 21, "app": {"id": 15368}, "conclusion": "failure"})
+        self.assertTrue(checks_pass(current, required), "Other apps cannot override the required source")
+        current[3]["conclusion"] = "failure"
+        current[4]["conclusion"] = "success"
+        self.assertFalse(checks_pass(current, required), "Same-name Actions success cannot substitute for coverage")
 
     def test_current_completed_summary_and_fresh_thumbs_up(self):
         pr = pull()
@@ -284,6 +311,15 @@ class PolicyTests(unittest.TestCase):
                   "submitted_at": "2026-10-10T10:05:00Z", "state": "DISMISSED",
                   "body": "Codex Review: Didn't find any major issues"}
         self.assertEqual(current_review(pull(), {"opened_head": HEAD}, [], [review], [], []), "findings")
+
+    def test_standalone_approved_verdict_is_terminal(self):
+        review = {"id": 1, "user": {"login": BOT}, "commit_id": HEAD,
+                  "submitted_at": "2026-10-10T10:05:00Z"}
+        for status in ("COMMENTED", "CHANGES_REQUESTED"):
+            review.update(state=status, body="Review complete.\nAPPROVED\n")
+            self.assertEqual(current_review(pull(), {"opened_head": HEAD}, [], [review], [], []), "clean")
+            review["body"] = "Do not accept a quoted `APPROVED` token."
+            self.assertEqual(current_review(pull(), {"opened_head": HEAD}, [], [review], [], []), "findings")
         review.update(state="COMMENTED", body="Fix the parser for `Codex Review: Didn't find any major issues`.")
         self.assertEqual(current_review(pull(), {"opened_head": HEAD}, [], [review], [], []), "findings")
 
@@ -294,6 +330,34 @@ class PolicyTests(unittest.TestCase):
                "RFC_PR": "1", "RFC_HEAD": HEAD, "RFC_BASE": BASE, "RFC_TICKET": "t"}
         with patch.dict(os.environ, env), self.assertRaisesRegex(RuntimeError, "stale"):
             admit(api, {}, "pilot")
+
+    def test_dispatch_admission_uses_base_code_and_pr_merge_checkout(self):
+        api = FakeAPI()
+        api.data = {"ticket": "t", "head": HEAD, "base": BASE, "phase": "final"}
+        env = {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_SHA": BASE,
+               "RFC_PR": "1", "RFC_HEAD": HEAD, "RFC_BASE": BASE, "RFC_TICKET": "t"}
+        with patch.dict(os.environ, env), patch("main.output") as output:
+            admit(api, {}, "pilot")
+            output.assert_called_once_with(run=True, full=True, **{"checkout-ref": "refs/pull/1/merge"})
+            api.pull["head"]["sha"] = NEXT
+            with self.assertRaisesRegex(RuntimeError, "stale"):
+                admit(api, {}, "pilot")
+        env["GITHUB_SHA"] = HEAD
+        api.pull["head"]["sha"] = HEAD
+        with patch.dict(os.environ, env), self.assertRaisesRegex(RuntimeError, "stale"):
+            admit(api, {}, "pilot")
+
+    def test_base_workflow_completion_reconciles_the_ticket_pr(self):
+        event = {"workflow_run": {"head_sha": BASE, "event": "workflow_dispatch",
+                 "display_title": "review-first-8-final-" + "a" * 32}}
+        with tempfile.NamedTemporaryFile(mode="w") as handle:
+            json.dump(event, handle)
+            handle.flush()
+            env = {"GITHUB_EVENT_PATH": handle.name, "RFC_OPERATION": "reconcile",
+                   "RFC_TOKEN": "unused", "RFC_PR": "", "RFC_CONFIG": "{}", "RFC_RESTORE": "false"}
+            with patch.dict(os.environ, env), patch("main.GitHub"), patch("main.Controller") as cls:
+                main()
+                cls.return_value.reconcile.assert_called_once_with(8, False)
 
     def test_checkout_requires_exact_merge_parents(self):
         with patch.dict(os.environ, {"RFC_TICKET": "t", "RFC_HEAD": HEAD, "RFC_BASE": BASE}):

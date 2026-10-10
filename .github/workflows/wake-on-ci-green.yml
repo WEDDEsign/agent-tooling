@@ -96,11 +96,15 @@ jobs:
           EXCLUDED_LABEL: ${{ inputs.excluded_label }}
         run: |
           set -eu
-          if [ -n "${EXCLUDED_LABEL}" ] && gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
-            --jq '.labels[].name' | grep -Fxq "${EXCLUDED_LABEL}"; then
-            echo "PR has a separate review transport — skipping."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
+          if [ -n "${EXCLUDED_LABEL}" ]; then
+            # A failed read must stop before the legacy transport can claim
+            # a gate owned by the review-first controller.
+            pr_labels=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.labels[].name')
+            if printf '%s\n' "$pr_labels" | grep -Fxq "${EXCLUDED_LABEL}"; then
+              echo "PR has a separate review transport — skipping."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           fi
           has_label=$(gh api --paginate --slurp "repos/${REPO}/issues/${PR_NUMBER}/labels?per_page=100" \
             | jq -r '[.[][] | select(.name == "awaiting-codex-reping")] | length')

@@ -53,7 +53,7 @@ class Controller:
         comment_id = self.api.save(pr["number"], state, comment_id)
         for workflow in self.config:
             self.api.request(f"actions/workflows/{workflow}/dispatches", "POST", {
-                "ref": pr["head"]["ref"], "inputs": {
+                "ref": pr["base"]["ref"], "inputs": {
                     "pr_number": str(pr["number"]), "expected_head": state["head"],
                     "expected_base": state["base"], "ticket": state["ticket"]}})
             state["dispatched"].append(workflow)
@@ -62,7 +62,7 @@ class Controller:
     def result(self, state):
         results = []
         for workflow, expected in self.config.items():
-            runs = self.api.runs(workflow, state["head"])
+            runs = self.api.runs(workflow, state["base"])
             matching = [r for r in runs if r.get("display_title") == "review-first-" + state["ticket"]]
             jobs = []
             if matching:
@@ -156,7 +156,10 @@ class Controller:
         comments = self.api.comments(number)
         state, comment_id = self.api.state(comments)
         rules = self.api.rules(pr)
-        required = required_checks(rules) - {GATE}
+        required = {check for check in required_checks(rules) if check[0] != GATE}
+        workers = {job for jobs in self.config.values() for job in jobs}
+        other_required = {check for check in required
+                          if check[0] not in workers or check[1] not in {None, -1, 15368}}
         managed = eligible(pr, self.api.repo, self.mode) and protected(rules)
         if restore and self.mode != "classic":
             raise RuntimeError("Set CI_REVIEW_MODE=classic before restoring full CI")
@@ -169,7 +172,7 @@ class Controller:
                 self.start(pr, state, comment_id, "classic")
                 return
             restored = state.get("phase") == "classic" and state.get("head") == head and state.get("base") == base
-            success = checks_pass(self.api.checks(head), required)
+            success = checks_pass(self.api.checks(head), other_required if restored else required)
             if restored:
                 success = success and self.result(state) == "success"
             if self.unchanged(pr):
@@ -208,8 +211,7 @@ class Controller:
                 state.update(baseline=True, phase="review")
                 comment_id = self.api.save(number, state, comment_id)
             elif (self.review(pr, state, comments) == "clean"
-                  and checks_pass(self.api.checks(head), required - {
-                      job for jobs in self.config.values() for job in jobs}) and self.unchanged(pr)):
+                  and checks_pass(self.api.checks(head), other_required) and self.unchanged(pr)):
                 self.complete(pr, "Current review and final validation passed")
                 return
         if state["phase"] == "review":

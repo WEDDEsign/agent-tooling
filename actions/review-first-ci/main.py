@@ -27,7 +27,7 @@ def admit(api, event, mode):
         pr = api.pr(number)
         state, _ = api.state(api.comments(number))
         if (pr["state"] != "open" or pr["head"]["sha"] != head or pr["base"]["sha"] != base
-                or os.environ["GITHUB_SHA"] != head or state.get("ticket") != ticket
+                or os.environ["GITHUB_SHA"] != base or state.get("ticket") != ticket
                 or state.get("head") != head or state.get("base") != base
                 or state.get("phase") not in {"initial", "final", "classic"}):
             raise RuntimeError("Validation request is stale or does not belong to this controller")
@@ -56,7 +56,8 @@ def verify_checkout():
 
 def main():
     api = GitHub(os.environ["RFC_TOKEN"])
-    event = json.load(open(os.environ["GITHUB_EVENT_PATH"]))
+    with open(os.environ["GITHUB_EVENT_PATH"]) as handle:
+        event = json.load(handle)
     operation = os.environ["RFC_OPERATION"]
     mode = os.environ.get("RFC_MODE") or "classic"
     if operation == "admit":
@@ -75,8 +76,15 @@ def main():
             numbers = [event["issue"]["number"]]
         elif "workflow_run" in event:
             run = event["workflow_run"]
-            prs = api.pages(f"commits/{run['head_sha']}/pulls")
-            numbers = [p["number"] for p in prs if p["state"] == "open"]
+            ticket = re.fullmatch(r"review-first-(\d+)-(?:initial|final|classic)-[0-9a-f]{32}",
+                                  run.get("display_title", ""))
+            if ticket and run.get("event") == "workflow_dispatch":
+                # Dispatched workflow code belongs to base; its commit is not
+                # the PR head. The ticket selects which live state to reconcile.
+                numbers = [int(ticket[1])]
+            else:
+                prs = api.pages(f"commits/{run['head_sha']}/pulls")
+                numbers = [p["number"] for p in prs if p["state"] == "open"]
         else:
             numbers = [p["number"] for p in api.pages("pulls?state=open")]
         failures = []
