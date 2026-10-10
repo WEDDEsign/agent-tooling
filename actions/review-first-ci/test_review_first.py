@@ -42,6 +42,8 @@ class FakeAPI:
         self.started = []
         self.gates = []
         self.notices = []
+        self.events = []
+        self.duplicate_pr = False
         self.check_results = checks()
 
     def pr(self, _):
@@ -82,6 +84,10 @@ class FakeAPI:
         return [copy.deepcopy(r) for r in self.jobs.get(workflow, []) if r["head_sha"] == head]
 
     def pages(self, path, key=None):
+        if path.startswith('commits/'):
+            return [self.pr(1)] + ([{**self.pr(1), 'number': 2}] if self.duplicate_pr else [])
+        if path.endswith('/events'):
+            return self.events
         run_id = int(path.split("/")[2])
         run = next(r for runs in self.jobs.values() for r in runs if r["id"] == run_id)
         return [{"name": name, "conclusion": run.get("job_result", run["conclusion"])}
@@ -193,6 +199,39 @@ class FlowTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "classic"):
             self.controller.reconcile(1, restore=True)
 
+    def test_new_base_invalidates_finished_final_validation(self):
+        self.initial()
+        self.controller.verdict = "clean"
+        self.controller.reconcile(1)
+        self.api.finish()
+        self.api.pull["base"]["sha"] = "d" * 40
+        self.api.pull["mergeable_state"] = "behind"
+        self.controller.reconcile(1)
+        self.assertIsNone(self.api.gates[-1][1])
+        self.assertEqual(len(self.api.started), 4, "Do not spend another full run before the branch is updated")
+
+    def test_classic_pr_cannot_clear_a_second_prs_gate_on_the_same_commit(self):
+        self.controller.mode = "classic"
+        self.api.duplicate_pr = True
+        self.controller.reconcile(1)
+        self.assertIsNone(self.api.gates[-1][1])
+
+    def test_declined_findings_can_be_reviewed_without_an_empty_commit(self):
+        self.initial()
+        self.controller.reviewer = self.api
+        self.controller.verdict = "findings"
+        self.api.label(1, "awaiting-codex-reping", True)
+        self.api.events = [{"id": 11, "event": "labeled", "label": {"name": "awaiting-codex-reping"}}]
+        self.controller.reconcile(1)
+        self.assertEqual(self.api.data["requested"]["gate_id"], 11)
+        self.assertEqual(len(self.api.notices), 1)
+        self.controller.reconcile(1)
+        self.assertEqual(len(self.api.notices), 1, "Do not repeat a consumed gate")
+        self.api.label(1, "awaiting-codex-reping", True)
+        self.api.events.append({"id": 12, "event": "labeled", "label": {"name": "awaiting-codex-reping"}})
+        self.controller.reconcile(1)
+        self.assertEqual(len(self.api.notices), 2, "An explicit new author gate is a new request")
+
 
 class PolicyTests(unittest.TestCase):
     def test_no_deferral_without_required_gate_and_strict_base(self):
@@ -239,6 +278,14 @@ class PolicyTests(unittest.TestCase):
         comment = {"id": 1, "user": {"login": "someone"}, "performed_via_github_app": None,
                    "body": MARKER + '\n```json\n{"version":1,"baseline":true}\n```'}
         self.assertEqual(GitHub("unused", REPO).state([comment]), ({}, None))
+
+    def test_withdrawn_approval_and_quoted_templates_are_not_clean(self):
+        review = {"id": 1, "user": {"login": BOT}, "commit_id": HEAD,
+                  "submitted_at": "2026-10-10T10:05:00Z", "state": "DISMISSED",
+                  "body": "Codex Review: Didn't find any major issues"}
+        self.assertEqual(current_review(pull(), {"opened_head": HEAD}, [], [review], [], []), "findings")
+        review.update(state="COMMENTED", body="Fix the parser for `Codex Review: Didn't find any major issues`.")
+        self.assertEqual(current_review(pull(), {"opened_head": HEAD}, [], [review], [], []), "findings")
 
     def test_dispatch_admission_rejects_changed_head(self):
         api = FakeAPI()

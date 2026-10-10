@@ -21,6 +21,16 @@ class Controller:
         return (now["state"] == "open" and now["head"]["sha"] == pr["head"]["sha"]
                 and now["base"]["sha"] == pr["base"]["sha"] and not now.get("draft"))
 
+    def complete(self, pr, message):
+        # Check runs belong to a commit, not a PR. A classic PR must not turn
+        # the same commit's pilot gate green through a second branch/base.
+        peers = [p for p in self.api.pages(f"commits/{pr['head']['sha']}/pulls")
+                 if p["state"] == "open" and p["head"]["sha"] == pr["head"]["sha"]]
+        if len(peers) != 1 or peers[0]["number"] != pr["number"]:
+            self.api.gate(pr["head"]["sha"], None, "Validation needs one open PR for this commit")
+        elif self.unchanged(pr):
+            self.api.gate(pr["head"]["sha"], "success", message)
+
     def review(self, pr, state, comments):
         n = pr["number"]
         args = (pr, state, comments, self.api.pages(f"pulls/{n}/reviews"),
@@ -68,8 +78,15 @@ class Controller:
 
     def request_review(self, pr, state, comment_id, verdict):
         head = pr["head"]["sha"]
-        if (REPING not in labels(pr) or state.get("requested", {}).get("head") == head
-                or verdict in {"clean", "running", "finishing", "findings"}):
+        if REPING not in labels(pr) or verdict in {"clean", "running", "finishing"}:
+            return
+        activations = [event["id"] for event in self.api.pages(f"issues/{pr['number']}/events")
+                       if event.get("event") == "labeled" and event.get("label", {}).get("name") == REPING]
+        if not activations:
+            raise RuntimeError("Cannot identify the review-gate activation")
+        gate_id = max(activations)
+        requested = state.get("requested", {})
+        if requested.get("head") == head and requested.get("gate_id", 0) >= gate_id:
             return
         rounds = [int(label.removeprefix("codex-round-")) for label in labels(pr)
                   if label.startswith("codex-round-") and label.removeprefix("codex-round-").isdigit()]
@@ -79,7 +96,8 @@ class Controller:
             raise RuntimeError("Review transport token is missing")
         if not self.unchanged(pr):
             return
-        state["request_intent"] = {"head": head, "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        state["request_intent"] = {"head": head, "gate_id": gate_id,
+                                   "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
         self.api.save(pr["number"], state, comment_id)
         # Same atomic label claim as the legacy transport. Legacy consumers
         # exclude ACTIVE, so only this controller may claim a pilot round.
@@ -96,7 +114,8 @@ class Controller:
                 self.api.label(pr["number"], REPING, True)
                 raise
             return
-        state["requested"] = {"head": head, "id": comment["id"], "at": comment["created_at"]}
+        state["requested"] = {"head": head, "gate_id": gate_id, "id": comment["id"], "at": comment["created_at"]}
+        state.pop("request_intent", None)
         self.api.save(pr["number"], state, comment_id)
 
     def recover_request(self, pr, state, comments, comment_id):
@@ -109,7 +128,8 @@ class Controller:
         if not landed:
             return False
         comment = min(landed, key=lambda c: c["id"])
-        state["requested"] = {"head": intent["head"], "id": comment["id"], "at": comment["created_at"]}
+        state["requested"] = {"head": intent["head"], "gate_id": intent["gate_id"],
+                              "id": comment["id"], "at": comment["created_at"]}
         state.pop("request_intent", None)
         self.api.save(pr["number"], state, comment_id)
         return True
@@ -153,14 +173,19 @@ class Controller:
             if restored:
                 success = success and self.result(state) == "success"
             if self.unchanged(pr):
-                self.api.gate(head, "success" if success else None,
-                              "Classic CI passed" if success else "Waiting for normal required checks")
+                if success:
+                    self.complete(pr, "Classic CI passed")
+                else:
+                    self.api.gate(head, None, "Waiting for normal required checks")
             return
         if not self.config or not all(isinstance(v, list) and v for v in self.config.values()):
             raise RuntimeError("Validation workflow/job configuration is empty or malformed")
         if ACTIVE not in labels(pr):
             self.api.label(number, ACTIVE, True)
         self.api.gate(head, None, "Waiting for review and final validation")
+        if pr.get("mergeable_state") in {"dirty", "unknown", "behind"}:
+            self.api.gate(head, None, "Waiting for an up-to-date, mergeable branch")
+            return
         if not state or state.get("phase") == "classic":
             state = {"version": 1, "baseline": False, "opened_head": head}
             self.start(pr, state, comment_id, "initial")
@@ -185,7 +210,7 @@ class Controller:
             elif (self.review(pr, state, comments) == "clean"
                   and checks_pass(self.api.checks(head), required - {
                       job for jobs in self.config.values() for job in jobs}) and self.unchanged(pr)):
-                self.api.gate(head, "success", "Current review and final validation passed")
+                self.complete(pr, "Current review and final validation passed")
                 return
         if state["phase"] == "review":
             self.recover_request(pr, state, comments, comment_id)

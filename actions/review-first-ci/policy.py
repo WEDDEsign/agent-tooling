@@ -68,8 +68,10 @@ def current_review(pr, state, comments, reviews, inline, reactions):
                and r.get("commit_id") == head and r.get("submitted_at", "") >= since]
     if current:
         latest = max(current, key=lambda r: r["id"])
-        if latest["state"] == "APPROVED" or re.search(
-                r"Codex Review: Didn't find any major issues", latest.get("body", ""), re.I):
+        if latest["state"] in {"DISMISSED", "CHANGES_REQUESTED"}:
+            return "findings"
+        if latest["state"] == "APPROVED" or latest.get("body", "").lstrip().lower().startswith(
+                "codex review: didn't find any major issues"):
             return "clean"
     summaries = [c for c in comments if c["user"]["login"] == BOT
                  and c.get("body", "").startswith("<!-- codex-pull-request-review-summary -->")
