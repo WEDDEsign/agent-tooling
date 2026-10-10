@@ -92,13 +92,14 @@ class GitHub:
         Exact patch text, hunk positions included: a base update that touches
         anything near the PR's lines changes the digest, which only costs a
         fresh review. Unlisted (3,000+) files, a patchless (binary or
-        oversized) file, or a head that moved while the files were read never
-        produce a digest: none of them can show the diff is unchanged.
+        oversized) file, or a head or base that moved while the files were
+        read never produce a digest: none can show the diff is unchanged.
         """
         files = self.pages(f"pulls/{int(pr['number'])}/files")
         if len(files) != pr.get("changed_files") or any("patch" not in f for f in files):
             return None
-        if self.pr(pr["number"])["head"]["sha"] != pr["head"]["sha"]:
+        now = self.pr(pr["number"])
+        if now["head"]["sha"] != pr["head"]["sha"] or now["base"]["sha"] != pr["base"]["sha"]:
             return None
         entries = sorted([f["filename"], f.get("previous_filename") or "", f.get("status") or "",
                           f["patch"]] for f in files)

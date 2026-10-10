@@ -136,6 +136,30 @@ class CarryoverTests(unittest.TestCase):
             self.assertEqual(self.controller.review(pull_at(HEAD, self.api), state, self.api.comments(1)), "clean")
         self.assertNotIn("reviewed", state)
 
+    def test_digest_is_not_recorded_when_the_base_moves_mid_read(self):
+        state = {"opened_head": HEAD}
+        moved = copy.deepcopy(self.api.pull)
+        moved["base"]["sha"] = "d" * 40
+        with patch.object(self.api, "pr", return_value=moved):
+            self.assertEqual(self.controller.review(pull_at(HEAD, self.api), state, self.api.comments(1)), "clean")
+        self.assertNotIn("reviewed", state)
+
+    def test_same_head_re_review_refreshes_the_anchor(self):
+        state = {"opened_head": HEAD}
+        self.assertEqual(self.verdict(state), "clean")
+        state["requested"] = {"head": HEAD, "gate_id": 8, "id": 9, "at": "2026-10-10T10:01:00Z"}
+        self.assertEqual(self.verdict(state), "clean")
+        self.assertEqual(state["reviewed"]["requested"], state["requested"])
+        self.api.update_base()
+        self.assertEqual(self.verdict(state), "clean", "The latest clean activation carries")
+
+    def test_receipt_survives_a_failed_digest_lookup(self):
+        state = {"opened_head": HEAD}
+        with patch.object(self.api, "diff_digest", side_effect=RuntimeError("GitHub GET pulls/1/files")):
+            self.assertEqual(self.verdict(state), "clean")
+        self.assertIn("approved_summary", self.api.data)
+        self.assertNotIn("reviewed", state)
+
     def test_reconcile_runs_final_validation_without_another_review_round(self):
         self.controller.reconcile(1)
         self.api.finish()

@@ -54,7 +54,6 @@ class Controller:
             time.sleep(10)
             found = reactions()
             verdict = current_review(*args, found)
-        changed = False
         if (verdict == "clean" and summary
                 and current_review(pr, state, comments, [], args[4], found) == "clean"):
             receipt = summary_receipt(pr, state, summary)
@@ -63,19 +62,25 @@ class Controller:
                 # approval switch. Persist the authenticated result. Review
                 # changes, findings and summary edits/deletion still invalidate it.
                 state["approved_summary"] = receipt
-                changed = True
-        if verdict == "clean" and (state.get("reviewed") or {}).get("head") != pr["head"]["sha"]:
-            diff = self.api.diff_digest(pr)
+                self.api.save(n, state, checkpoint_id)
+        anchor = {"head": pr["head"]["sha"], "requested": state.get("requested", {}),
+                  "opened_head": state.get("opened_head"),
+                  "approved_summary": state.get("approved_summary")}
+        reviewed = state.get("reviewed") or {}
+        if verdict == "clean" and {k: reviewed.get(k) for k in anchor} != anchor:
+            # The receipt above is already durable; the anchor is optional, so a
+            # failed lookup only means no carry-over until the next reconcile.
+            try:
+                diff = self.api.diff_digest(pr)
+            except RuntimeError:
+                diff = None
             if diff:
                 # Everything needed to re-check this review later, plus the PR
                 # diff it covered, so a base update can carry it (carried()).
-                state["reviewed"] = {"head": pr["head"]["sha"], "diff": diff,
-                                     "requested": state.get("requested", {}),
-                                     "opened_head": state.get("opened_head"),
-                                     "approved_summary": state.get("approved_summary")}
-                changed = True
-        if changed:
-            self.api.save(n, state, checkpoint_id)
+                # Refreshed on a same-head re-review too, so the anchor always
+                # names the latest clean activation.
+                state["reviewed"] = {**anchor, "diff": diff}
+                self.api.save(n, state, checkpoint_id)
         if verdict == "missing" and self.carried(pr, state, *args[2:], found):
             return "clean"
         return verdict
