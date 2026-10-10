@@ -188,8 +188,8 @@ class GitHub:
             return
         binding = json.loads(check.get("output", {}).get("text") or "{}")
         if binding.get("pr") == pr["number"]:
-            # A closing duplicate cannot revoke another PR's certificate.
-            self.gate(pr, None, "Certifying pull request closed; fresh validation required")
+            # A closing/retargeted duplicate cannot revoke another PR's certificate.
+            self.gate(pr, None, "Certifying pull request no longer eligible; fresh validation required")
 
     def gate(self, pr, conclusion, text):
         if not dedicated_app(self.app_id):

@@ -183,6 +183,7 @@ class Controller:
         if not trusted_base(pr):
             # Non-default targets retain normal CI; they cannot replace the
             # commit's certificate for its default-branch merge candidate.
+            self.api.retire_validation(pr)
             if ACTIVE in labels(pr):
                 self.api.label(number, ACTIVE, False)
             return

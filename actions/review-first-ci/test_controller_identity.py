@@ -297,6 +297,22 @@ class IdentityTests(unittest.TestCase):
         api.sources[1]['head']['sha'] = NEXT
         self.assertFalse(api.reusable_validation(api.pull))
 
+    def test_retargeting_certifier_retires_shared_gate_before_an_adopter_event(self):
+        api = AppStore()
+        api.sources[1] = copy.deepcopy(api.pull)
+        api.gate(api.pull, 'success', 'Validated default-branch candidate')
+        api.pull['number'] = 2
+        self.assertTrue(api.reusable_validation(api.pull))
+        api.sources[1]['base']['ref'] = 'other-target'
+        api.sources[1]['labels'].append({'name': 'review-first-ci-active'})
+        controller = Harness(api, None, 'pilot', CONFIG)
+        controller.reconcile(1)  # Only the retargeted source receives an event.
+        self.assertEqual(api.validation_check(HEAD)['status'], 'in_progress')
+        self.assertFalse(api.reusable_validation(api.pull))
+        self.assertEqual(api.started, [], 'No dispatch against an untrusted target')
+        controller.reconcile(2)
+        self.assertEqual(len(api.started), 2)
+
     def test_state_cannot_be_imported_from_another_pr_or_app(self):
         api = AppStore()
         state = {'version': 2, 'head': HEAD, 'phase': 'final'}

@@ -22,10 +22,10 @@ phase and review bookkeeping remain per PR; this is not a promise to suppress
 every duplicate workflow. Classic PRs retain their existing CI policy.
 The required gate is one App-owned check per commit, bound to the validated
 default-branch base. Other PRs' state writes cannot reset it; the certifying
-PR's withdrawn review still invalidates the shared result. Closing that PR
+PR's withdrawn review still invalidates the shared result. Closing or retargeting that PR
 retires its certificate; reuse also requires its head to remain unchanged and
 the check to have completed within the past seven days. Non-default-target
-PRs cannot publish or replace this certificate.
+PRs cannot publish or replace another PR's certificate.
 
 The consumer supplies a JSON mapping of workflow filenames to test job names.
 Each worker accepts `pr_number`, `expected_head`, `expected_base`, and `ticket`
