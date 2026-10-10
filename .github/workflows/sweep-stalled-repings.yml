@@ -11,13 +11,7 @@ name: Sweep stalled Codex re-pings (reusable)
 # There is no error, no retry and no signal; the loop simply stops, and the
 # only recovery is a human noticing a parked PR and re-pinging by hand.
 #
-# The autopilot's answer has been to document the correct order ("label first,
-# then push"). That cannot close a race: a session can follow the instruction
-# and still lose. So this workflow is level-triggered instead — it asks "which
-# PRs are, right now, labelled and green and un-re-pinged?" on a schedule.
-# Whenever the label lands, the next sweep picks it up. Ordering stops
-# mattering.
-#
+# Reconcile labelled, green, unreviewed PRs independently of event ordering.
 # WHY CRON AND NOT A `pull_request: labeled` TRIGGER
 # The obvious fix — fire when the label is added — was built, reviewed and
 # withdrawn (agent-tooling#6). Two reasons, both fatal:
@@ -90,11 +84,7 @@ name: Sweep stalled Codex re-pings (reusable)
 #
 # WHAT IT FIXES, AND WHAT IT ONLY MAKES VISIBLE
 # Fixed outright:
-#   - the missed-label race above;
-#   - a gate applied when CI is ALREADY green — after a content-free Codex
-#     pass, say. No further CI completion is coming and label writes do not
-#     emit `workflow_run`, so today that state needs a human to re-run a
-#     workflow by hand. The sweep needs no event.
+#   - a missed label, including one applied after CI was already green.
 #     NOTE the precondition: something must have applied the gate. If a
 #     content-free review arrives and NO session runs, `wake-on-codex-review`
 #     filters the event and nothing re-labels, so the PR carries no gate and
@@ -115,6 +105,10 @@ name: Sweep stalled Codex re-pings (reusable)
 on:
   workflow_call:
     inputs:
+      excluded_label:
+        description: PR label owned by a separate review transport; empty preserves existing behavior
+        type: string
+        default: ''
       required_checks:
         description: 'JSON array of required check-run names that must all be success. Use the SAME value as the wake-on-ci-green caller — a narrower list here would re-ping against checks that path considers incomplete. e.g. ["Backend (pytest)","Frontend (tsc + build)"]'
         type: string
@@ -169,6 +163,7 @@ jobs:
           REQUIRED_CHECKS: ${{ inputs.required_checks }}
           ESCALATION_HANDLE: ${{ inputs.escalation_handle }}
           LABEL: ${{ inputs.label }}
+          EXCLUDED_LABEL: ${{ inputs.excluded_label }}
           SOFTWARN_ROUND: ${{ inputs.softwarn_round }}
           HARDSTOP_ROUND: ${{ inputs.hardstop_round }}
         run: |
@@ -252,6 +247,11 @@ jobs:
 
           for pr in ${prs}; do
             info=$(gh api "repos/${REPO}/pulls/${pr}")
+            if [ -n "${EXCLUDED_LABEL}" ] && printf '%s' "${info}" \
+              | jq -e --arg label "${EXCLUDED_LABEL}" '.labels | any(.name == $label)' >/dev/null; then
+              note "| #${pr} | separate review transport — skipped |"
+              continue
+            fi
             head_sha=$(printf '%s' "${info}" | jq -r '.head.sha')
             merge_state=$(printf '%s' "${info}" | jq -r '.mergeable_state')
             is_draft=$(printf '%s' "${info}" | jq -r '.draft')
