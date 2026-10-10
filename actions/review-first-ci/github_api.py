@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timedelta, timezone
 from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -166,9 +167,29 @@ class GitHub:
         if not check or check.get("status") != "completed" or check.get("conclusion") != "success":
             return False
         binding = json.loads(check.get("output", {}).get("text") or "{}")
-        return (binding.get("head") == pr["head"]["sha"] and binding.get("base") == pr["base"]["sha"]
+        if not (binding.get("head") == pr["head"]["sha"] and binding.get("base") == pr["base"]["sha"]
                 and binding.get("target") == pr["base"]["ref"]
-                and isinstance(binding.get("pr"), int) and binding["pr"] != pr["number"])
+                and isinstance(binding.get("pr"), int) and binding["pr"] != pr["number"]):
+            return False
+        try:
+            completed = datetime.fromisoformat(str(check.get("completed_at", "")).replace("Z", "+00:00"))
+            age = datetime.now(timezone.utc) - completed
+        except (KeyError, TypeError, ValueError):
+            return False
+        if not timedelta(0) <= age < timedelta(days=7):
+            return False
+        source = self.pr(binding["pr"])
+        return (source["state"] == "open" and source["head"]["sha"] == binding["head"]
+                and source["base"]["ref"] == binding["target"])
+
+    def retire_validation(self, pr):
+        check = self.validation_check(pr["head"]["sha"])
+        if not check or check.get("conclusion") != "success":
+            return
+        binding = json.loads(check.get("output", {}).get("text") or "{}")
+        if binding.get("pr") == pr["number"]:
+            # A closing duplicate cannot revoke another PR's certificate.
+            self.gate(pr, None, "Certifying pull request closed; fresh validation required")
 
     def gate(self, pr, conclusion, text):
         if not dedicated_app(self.app_id):

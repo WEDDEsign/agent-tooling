@@ -1,5 +1,6 @@
 """Pure decisions shared by admission and the trusted metadata controller."""
 
+import hashlib
 import re
 
 BOT = "chatgpt-codex-connector[bot]"
@@ -17,7 +18,8 @@ def codex_author(item):
 
 def summary_receipt(pr, state, summary):
     return {"head": pr["head"]["sha"], "id": summary["id"],
-            "updated_at": summary.get("updated_at"), "body": summary.get("body"),
+            "updated_at": summary.get("updated_at"),
+            "body_sha256": hashlib.sha256(summary["body"].encode("utf-8")).hexdigest(),
             "activation": state.get("requested", {})}
 
 

@@ -178,6 +178,7 @@ class Controller:
         pr = self.api.pr(number)
         head, base = pr["head"]["sha"], pr["base"]["sha"]
         if pr["state"] != "open":
+            self.api.retire_validation(pr)
             return
         if not trusted_base(pr):
             # Non-default targets retain normal CI; they cannot replace the

@@ -2,6 +2,7 @@
 import copy
 import json
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
@@ -20,11 +21,16 @@ class AppStore(FakeAPI, GitHub):
     owned = GitHub.owned
     write_check = GitHub.write_check
     reusable_validation = GitHub.reusable_validation
+    retire_validation = GitHub.retire_validation
 
     def __init__(self):
         FakeAPI.__init__(self)
         self.records = {}
         self.discussion = []
+        self.sources = {}
+
+    def pr(self, number):
+        return copy.deepcopy(self.sources.get(number, self.pull))
 
     def checks(self, head):
         return self.check_results + [copy.deepcopy(c) for c in self.records.values() if c['head_sha'] == head]
@@ -35,12 +41,16 @@ class AppStore(FakeAPI, GitHub):
     def request(self, path, method='GET', data=None):
         if path == 'check-runs':
             check = {**copy.deepcopy(data), 'id': len(self.records) + 100, 'app': {'id': APP}}
+            if data.get('conclusion') == 'success':
+                check['completed_at'] = datetime.now(timezone.utc).isoformat()
             self.records[check['id']] = check
             return copy.deepcopy(check)
         if path.startswith('check-runs/'):
             check = self.records[int(path.split('/')[1])]
             if method == 'PATCH':
                 check.update(copy.deepcopy(data))
+                if data.get('conclusion') == 'success':
+                    check['completed_at'] = datetime.now(timezone.utc).isoformat()
             return copy.deepcopy(check)
         if path == 'issues/1/comments':
             self.discussion.append({'id': len(self.discussion) + 1, **copy.deepcopy(data)})
@@ -244,6 +254,49 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(api.validation_check(HEAD), certified)
         self.assertNotIn({'name': 'review-first-ci-active'}, api.pull['labels'])
 
+    def test_expired_or_unavailable_completion_cannot_park_a_duplicate_pr(self):
+        now = datetime.now(timezone.utc)
+        for timestamp, reusable in [(now - timedelta(days=6), True),
+                                    (now - timedelta(days=7), False),
+                                    (now + timedelta(days=1), False), (None, False)]:
+            api = AppStore()
+            api.gate(api.pull, 'success', 'Validated')
+            check = api.validation_check(HEAD)
+            api.records[check['id']]['completed_at'] = timestamp.isoformat() if timestamp else None
+            api.pull['number'] = 2
+            self.assertEqual(api.reusable_validation(api.pull), reusable)
+            Harness(api, None, 'pilot', CONFIG).reconcile(2)
+            self.assertEqual(len(api.started), 0 if reusable else 2)
+            if not reusable:
+                self.assertEqual(api.validation_check(HEAD)['status'], 'in_progress')
+
+    def test_closed_source_retires_gate_but_closed_duplicate_cannot_revoke_it(self):
+        api = AppStore()
+        api.sources[1] = copy.deepcopy(api.pull)
+        api.gate(api.pull, 'success', 'Validated')
+        certificate = api.validation_check(HEAD)
+        api.pull.update(number=2, state='closed')
+        controller = Harness(api, None, 'pilot', CONFIG)
+        controller.reconcile(2)
+        self.assertEqual(api.validation_check(HEAD), certificate)
+        api.pull['state'] = 'open'
+        self.assertTrue(api.reusable_validation(api.pull))
+        api.sources[1]['state'] = 'closed'
+        self.assertFalse(api.reusable_validation(api.pull), 'Fail closed even before closure event delivery')
+        controller.reconcile(1)
+        self.assertEqual(api.validation_check(HEAD)['status'], 'in_progress')
+        self.assertEqual(api.started, [], 'Closing does not dispatch validation')
+        controller.reconcile(2)
+        self.assertEqual(len(api.started), 2, 'The open adopter can now validate independently')
+
+    def test_moved_source_cannot_supply_a_reusable_certificate(self):
+        api = AppStore()
+        api.sources[1] = copy.deepcopy(api.pull)
+        api.gate(api.pull, 'success', 'Validated')
+        api.pull['number'] = 2
+        api.sources[1]['head']['sha'] = NEXT
+        self.assertFalse(api.reusable_validation(api.pull))
+
     def test_state_cannot_be_imported_from_another_pr_or_app(self):
         api = AppStore()
         state = {'version': 2, 'head': HEAD, 'phase': 'final'}
@@ -403,6 +456,18 @@ class IdentityTests(unittest.TestCase):
         dismissed = {'id': 43, 'user': {'login': BOT}, 'commit_id': HEAD,
                      'submitted_at': '2026-10-10T10:06:00Z', 'state': 'DISMISSED'}
         self.assertEqual(current_review(pr, state, [summary], [dismissed], [], []), 'findings')
+
+    def test_large_unicode_summary_has_a_bounded_edit_sensitive_receipt(self):
+        api = AppStore()
+        summary = {'id': 40, 'updated_at': '2026-10-10T10:05:00Z',
+                   'body': 'Review details æøå U0001f44d' * 10000}
+        state = {'version': 2, 'head': HEAD, 'phase': 'review', 'opened_head': HEAD}
+        state['approved_summary'] = summary_receipt(api.pull, state, summary)
+        check_id = api.save(1, state, None)
+        self.assertLess(len(api.records[check_id]['output']['text']), 1000)
+        self.assertEqual(len(state['approved_summary']['body_sha256']), 64)
+        summary['body'] += 'Edited'
+        self.assertNotEqual(state['approved_summary'], summary_receipt(api.pull, state, summary))
 
     def test_runner_interruption_after_claim_recovers_without_a_new_push(self):
         api = FakeAPI()

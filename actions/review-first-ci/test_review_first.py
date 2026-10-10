@@ -81,6 +81,9 @@ class FakeAPI:
     def reusable_validation(self, _):
         return False
 
+    def retire_validation(self, _):
+        pass
+
     def request(self, path, method, payload):
         if path.endswith("/dispatches"):
             self.started.append((path.split("/")[2], copy.deepcopy(payload)))
