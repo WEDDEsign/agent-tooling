@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 
 from github_api import GitHub
-from policy import (ACTIVE, BOT, GATE, REPING, checks_pass, current_review, eligible,
+from policy import (ACTIVE, GATE, REPING, checks_pass, codex_author, current_review, eligible,
                     labels, protected, required_checks, run_result, trusted_base)
 
 
@@ -31,7 +31,7 @@ class Controller:
         n = pr["number"]
         args = (pr, state, comments, self.api.pages(f"pulls/{n}/reviews"),
                 self.api.pages(f"pulls/{n}/comments"))
-        summaries = [c for c in comments if c["user"]["login"] == BOT
+        summaries = [c for c in comments if codex_author(c)
                      and c.get("body", "").startswith("<!-- codex-pull-request-review-summary -->")]
         summary = max(summaries, key=lambda c: c["id"], default=None)
 

@@ -10,6 +10,10 @@ REPING = "awaiting-codex-reping"
 MARKER = "<!-- review-first-ci:v2 -->"
 
 
+def codex_author(item):
+    return (item.get("user") or {}).get("login") == BOT
+
+
 def dedicated_app(app_id):
     return isinstance(app_id, int) and app_id > 0 and app_id != 15368
 
@@ -79,10 +83,10 @@ def current_review(pr, state, comments, reviews, inline, reactions):
         return "missing"
     # An edited old inline finding is new feedback even if its thread remains
     # resolved. A new review activation may supersede it after author triage.
-    findings = [c for c in inline if c["user"]["login"] == BOT
+    findings = [c for c in inline if codex_author(c)
                 and (c.get("commit_id") == head or c.get("updated_at", "") > c.get("created_at", ""))
                 and max(c.get("created_at", ""), c.get("updated_at", "")) >= since]
-    current = [r for r in reviews if r["user"]["login"] == BOT
+    current = [r for r in reviews if codex_author(r)
                and r.get("commit_id") == head and r.get("submitted_at", "") >= since]
     if current:
         latest = max(current, key=lambda r: r["id"])
@@ -100,7 +104,7 @@ def current_review(pr, state, comments, reviews, inline, reactions):
         if latest["state"] == "APPROVED" or latest.get("body", "").lstrip().lower().startswith(
                 "codex review: didn't find any major issues"):
             return "clean"
-    summaries = [c for c in comments if c["user"]["login"] == BOT
+    summaries = [c for c in comments if codex_author(c)
                  and c.get("body", "").startswith("<!-- codex-pull-request-review-summary -->")
                  and c.get("updated_at", "") >= since]
     if not summaries:
@@ -118,7 +122,7 @@ def current_review(pr, state, comments, reviews, inline, reactions):
         return "running"
     if "**Completed**" not in row:
         return "missing"
-    thumbs_up = any(r["user"]["login"] == BOT and r["content"] == "+1"
+    thumbs_up = any(codex_author(r) and r["content"] == "+1"
                     and r.get("created_at", "") >= max(since, summary["updated_at"])
                     for r in reactions)
     return "clean" if thumbs_up and not findings else "findings" if findings else "finishing"

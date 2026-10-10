@@ -256,6 +256,28 @@ class IdentityTests(unittest.TestCase):
             self.assertEqual(controller.review(pull(), {'opened_head': HEAD}, [summary]), 'clean')
             self.assertIn(('issues/comments/40/reactions',), [c.args for c in calls.call_args_list])
 
+    def test_deleted_actors_neither_approve_nor_block_authenticated_review(self):
+        for identity in ({'user': None}, {}):
+            api = FakeAPI()
+            body = '<!-- codex-pull-request-review-summary -->\n' \
+                   f'| **Code Review** | **Completed** | `{HEAD[:7]}` | PR opened |'
+            orphan = {**identity, 'id': 40, 'body': body, 'content': '+1',
+                      'commit_id': HEAD, 'state': 'APPROVED',
+                      'created_at': '2026-10-10T10:05:00Z',
+                      'updated_at': '2026-10-10T10:05:00Z',
+                      'submitted_at': '2026-10-10T10:05:00Z'}
+            controller = Controller(api, None, 'pilot', CONFIG)
+            state = {'opened_head': HEAD}
+            with patch.object(api, 'pages', return_value=[orphan]):
+                self.assertEqual(controller.review(pull(), state, [orphan]), 'missing')
+            summary = {**orphan, 'id': 41, 'user': {'login': BOT}}
+            reaction = {'user': {'login': BOT}, 'content': '+1',
+                        'created_at': '2026-10-10T10:05:01Z'}
+            def pages(path, key=None):
+                return [orphan, reaction] if path.endswith('/reactions') else [orphan]
+            with patch.object(api, 'pages', side_effect=pages):
+                self.assertEqual(controller.review(pull(), state, [orphan, summary]), 'clean')
+
     def test_runner_interruption_after_claim_recovers_without_a_new_push(self):
         api = FakeAPI()
         controller = Harness(api, None, 'pilot', CONFIG)
