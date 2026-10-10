@@ -70,7 +70,6 @@ class Controller:
                 # Everything needed to re-check this review later, plus the PR
                 # diff it covered, so a base update can carry it (carried()).
                 state["reviewed"] = {"head": pr["head"]["sha"], "diff": diff,
-                                     "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                                      "requested": state.get("requested", {}),
                                      "opened_head": state.get("opened_head"),
                                      "approved_summary": state.get("approved_summary")}
@@ -95,7 +94,16 @@ class Controller:
             return False
         if state.get("requested", {}) != reviewed.get("requested") or state.get("request_intent"):
             return False  # A review was asked for since; its result governs.
-        since = reviewed.get("at", "")
+        # Cut off at the clean review's own activation (as current_review()
+        # bounds it), not when the controller noticed it: a finding on an
+        # intervening head can predate the controller's first look.
+        requested = reviewed.get("requested") or {}
+        if requested.get("head") == reviewed["head"]:
+            since = requested.get("at", "")
+        elif reviewed.get("opened_head") == reviewed["head"]:
+            since = pr["created_at"]
+        else:
+            return False
         for item in [*reviews, *inline]:
             stamp = max(item.get("submitted_at") or "", item.get("created_at") or "",
                         item.get("updated_at") or "")

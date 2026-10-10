@@ -105,10 +105,15 @@ class CarryoverTests(unittest.TestCase):
 
     def test_review_of_an_intervening_head_ends_the_carry_over(self):
         state = self.reviewed_then_updated()
-        state["reviewed"]["at"] = "2026-10-10T10:06:00Z"
         self.api.inline.append({"user": {"login": BOT}, "commit_id": "e" * 40,
                                 "created_at": "2026-10-10T10:20:00Z", "updated_at": "2026-10-10T10:20:00Z"})
         self.assertEqual(self.verdict(state), "missing", "A revert must not hide an intervening finding")
+
+    def test_findings_before_this_review_was_requested_do_not_block(self):
+        state = self.reviewed_then_updated()
+        self.api.inline.append({"user": {"login": BOT}, "commit_id": "e" * 40,
+                                "created_at": "2026-10-10T09:50:00Z", "updated_at": "2026-10-10T09:50:00Z"})
+        self.assertEqual(self.verdict(state), "clean", "Earlier rounds' findings predate the clean review")
 
     def test_a_later_review_request_ends_the_carry_over(self):
         state = self.reviewed_then_updated()
