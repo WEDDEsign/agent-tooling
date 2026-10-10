@@ -138,8 +138,6 @@ class Controller:
         self.api.gate(state["head"], "failure", "Validation failed; merge remains blocked")
         if state.get("failure_reported") == state["ticket"]:
             return
-        state["failure_reported"] = state["ticket"]
-        self.api.save(pr["number"], state, comment_id)
         codex_owned = pr["head"]["ref"].startswith("codex/") or "codex-only" in labels(pr)
         message = f"Review-first {state['phase']} validation failed for `{state['head']}`. "
         message += "The PR author should inspect the failed Actions run, fix it, and push. Merge is blocked."
@@ -147,6 +145,8 @@ class Controller:
             self.reviewer.request(f"issues/{pr['number']}/comments", "POST", {"body": "@Claude — " + message})
         else:
             self.api.request(f"issues/{pr['number']}/comments", "POST", {"body": message})
+        state["failure_reported"] = state["ticket"]
+        self.api.save(pr["number"], state, comment_id)
 
     def reconcile(self, number, restore=False):
         pr = self.api.pr(number)
@@ -172,7 +172,8 @@ class Controller:
                 self.start(pr, state, comment_id, "classic")
                 return
             restored = state.get("phase") == "classic" and state.get("head") == head and state.get("base") == base
-            success = checks_pass(self.api.checks(head), other_required if restored else required)
+            success = checks_pass(self.api.checks(head), other_required if restored else required,
+                                  self.api.statuses(pr))
             if restored:
                 success = success and self.result(state) == "success"
             if self.unchanged(pr):
@@ -200,6 +201,11 @@ class Controller:
                 return
             state.update(head=head, base=base, phase="review", ticket="")
             comment_id = self.api.save(number, state, comment_id)
+        if state["phase"] == "final" and self.review(pr, state, comments) != "clean":
+            # Approval can be withdrawn without a push. An author may resolve
+            # or decline findings and re-arm the gate for this same head.
+            state.update(phase="review", ticket="")
+            comment_id = self.api.save(number, state, comment_id)
         if state["phase"] in {"initial", "final"}:
             result = self.result(state)
             if result == "failure":
@@ -211,7 +217,8 @@ class Controller:
                 state.update(baseline=True, phase="review")
                 comment_id = self.api.save(number, state, comment_id)
             elif (self.review(pr, state, comments) == "clean"
-                  and checks_pass(self.api.checks(head), other_required) and self.unchanged(pr)):
+                  and checks_pass(self.api.checks(head), other_required, self.api.statuses(pr))
+                  and self.unchanged(pr)):
                 self.complete(pr, "Current review and final validation passed")
                 return
         if state["phase"] == "review":

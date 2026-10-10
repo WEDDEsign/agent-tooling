@@ -73,6 +73,9 @@ class FakeAPI:
     def checks(self, _):
         return self.check_results
 
+    def statuses(self, _):
+        return []
+
     def request(self, path, method, payload):
         if path.endswith("/dispatches"):
             self.started.append((path.split("/")[2], copy.deepcopy(payload)))
@@ -187,6 +190,45 @@ class FlowTests(unittest.TestCase):
         self.controller.reconcile(1)
         self.assertEqual(len(self.api.notices), 1)
         self.assertEqual(self.api.gates[-1][1], "failure")
+
+    def test_withdrawn_approval_returns_to_review_even_while_workers_run(self):
+        for finish_workers in (False, True):
+            with self.subTest(finish_workers=finish_workers):
+                self.setUp()
+                self.initial()
+                self.controller.verdict = "clean"
+                self.controller.reconcile(1)
+                if finish_workers:
+                    self.api.finish()
+                old_ticket = self.api.data["ticket"]
+                self.controller.verdict = "findings"
+                self.controller.reviewer = self.api
+                self.api.label(1, "awaiting-codex-reping", True)
+                self.api.events = [{"id": 21, "event": "labeled",
+                                    "label": {"name": "awaiting-codex-reping"}}]
+                self.controller.reconcile(1)
+                self.assertEqual(self.api.data["phase"], "review")
+                self.assertEqual(len(self.api.notices), 1, "The same head can be re-reviewed")
+                self.assertIsNone(self.api.gates[-1][1])
+                self.controller.verdict = "clean"
+                self.controller.reconcile(1)
+                self.assertNotEqual(self.api.data["ticket"], old_ticket)
+                self.assertEqual(len(self.api.started), 6, "Reapproval requires fresh final validation")
+
+    def test_failed_notification_is_retried_then_recorded_once(self):
+        self.api.pull["head"]["ref"] = "claude/feature"
+        self.controller.reviewer = self.api
+        self.controller.reconcile(1)
+        self.api.finish("failure")
+        with patch.object(self.api, "request", side_effect=RuntimeError("transport unavailable")):
+            with self.assertRaisesRegex(RuntimeError, "transport unavailable"):
+                self.controller.reconcile(1)
+        self.assertNotIn("failure_reported", self.api.data)
+        self.controller.reconcile(1)
+        self.assertEqual(self.api.data["failure_reported"], self.api.data["ticket"])
+        self.controller.reconcile(1)
+        self.assertEqual(len(self.api.notices), 1)
+        self.assertTrue(self.api.notices[0]["body"].startswith("@Claude"))
 
     def test_rollback_dispatches_tests_for_existing_pilot(self):
         self.initial()

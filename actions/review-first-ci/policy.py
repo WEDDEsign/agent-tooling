@@ -42,12 +42,19 @@ def protected(rules):
                for rule in rules)
 
 
-def checks_pass(checks, required):
+def checks_pass(checks, required, statuses=()):
     for name, source in required:
         candidates = [check for check in checks if check["name"] == name
                       and (source in {None, -1} or check.get("app", {}).get("id") == source)]
         latest = max(candidates, key=lambda c: c["id"], default={})
-        if latest.get("status") != "completed" or latest.get("conclusion") != "success":
+        contexts = [s for s in statuses if s["context"] == name and s["isRequired"]]
+        if not latest and not contexts:
+            return False
+        # If a required name exists as both a check and a commit status,
+        # GitHub requires both. Success in one must not hide failure in the other.
+        if latest and (latest.get("status") != "completed" or latest.get("conclusion") != "success"):
+            return False
+        if any(s["state"] != "SUCCESS" for s in contexts):
             return False
     return True
 

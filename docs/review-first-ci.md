@@ -27,7 +27,7 @@ not successful validation. A new push invalidates final validation. If initial
 validation failed, the next push repeats initial validation.
 
 `admit` and `verify-checkout` need read-only repository access. `reconcile`
-needs Actions/checks/issues write and contents/pull-requests read. Its separate
+needs Actions/checks/issues write and contents/pull-requests/statuses read. Its separate
 review token posts the bare review trigger under a human identity. Run it as
 trusted metadata-only code; do not check out the PR with those credentials.
 Keep the existing author routing: Codex-owned PRs must not wake Claude.

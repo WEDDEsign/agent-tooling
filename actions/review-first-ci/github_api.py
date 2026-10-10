@@ -1,8 +1,9 @@
-"""Small REST adapter; secrets stay in authorization headers, never output."""
+"""Small GitHub adapter; secrets stay in authorization headers, never output."""
 
 import json
 import os
-from urllib.error import HTTPError
+from http.client import HTTPException
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
@@ -16,7 +17,9 @@ class GitHub:
 
     def request(self, path, method="GET", data=None):
         raw = None if data is None else json.dumps(data).encode()
-        request = Request("https://api.github.com/repos/" + self.repo + "/" + path,
+        url = ("https://api.github.com/graphql" if path == "graphql" else
+               "https://api.github.com/repos/" + self.repo + "/" + path)
+        request = Request(url,
                           data=raw, method=method, headers={
                               "Authorization": "Bearer " + self.token,
                               "Accept": "application/vnd.github+json",
@@ -28,6 +31,10 @@ class GitHub:
                 return json.loads(body) if body else None
         except HTTPError as error:
             raise RuntimeError(f"GitHub {method} {path.split('?')[0]}: HTTP {error.code}") from None
+        except (URLError, OSError, HTTPException, json.JSONDecodeError) as error:
+            # Keep fallback/retry behavior consistent even without an HTTP
+            # response. Exception reasons can contain request details.
+            raise RuntimeError(f"GitHub {method} {path.split('?')[0]}: {type(error).__name__}") from None
 
     def pages(self, path, key=None):
         result = []
@@ -48,6 +55,26 @@ class GitHub:
 
     def checks(self, head):
         return self.pages(f"commits/{head}/check-runs", "check_runs")
+
+    def statuses(self, pr):
+        # Status.contexts is GitHub's current set (not the REST status history).
+        # isRequired lets GitHub apply the PR's source binding; REST statuses
+        # expose a creator but no integration ID, so do not guess one from login.
+        # https://docs.github.com/en/graphql/reference/commits#statuscontext
+        owner, name = self.repo.split("/", 1)
+        response = self.request("graphql", "POST", {
+            "query": """query($owner:String!,$name:String!,$head:GitObjectID!,$pr:Int!){
+              repository(owner:$owner,name:$name){object(oid:$head){... on Commit{
+                status{contexts{context state isRequired(pullRequestNumber:$pr)}}
+              }}}
+            }""",
+            "variables": {"owner": owner, "name": name, "head": pr["head"]["sha"], "pr": pr["number"]}})
+        if response.get("errors"):
+            raise RuntimeError("GitHub could not evaluate required commit statuses")
+        commit = response["data"]["repository"]["object"]
+        if commit is None:
+            raise RuntimeError("GitHub could not find the requested commit")
+        return (commit.get("status") or {}).get("contexts", [])
 
     def comments(self, number):
         return self.pages(f"issues/{number}/comments")
