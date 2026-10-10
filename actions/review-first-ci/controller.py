@@ -179,6 +179,12 @@ class Controller:
         head, base = pr["head"]["sha"], pr["base"]["sha"]
         if pr["state"] != "open":
             return
+        if not trusted_base(pr):
+            # Non-default targets retain normal CI; they cannot replace the
+            # commit's certificate for its default-branch merge candidate.
+            if ACTIVE in labels(pr):
+                self.api.label(number, ACTIVE, False)
+            return
         comments = self.api.comments(number)
         state, checkpoint_id = self.api.state(pr, comments)
         rules = self.api.rules(pr)
@@ -189,6 +195,8 @@ class Controller:
         managed = eligible(pr, self.api.repo, self.mode) and protected(rules, self.api.app_id)
         if restore and self.mode != "classic":
             raise RuntimeError("Set CI_REVIEW_MODE=classic before restoring full CI")
+        if managed and not restore and self.api.reusable_validation(pr):
+            return
         if not managed:
             restored = state.get("phase") == "classic" and state.get("head") == head and state.get("base") == base
             deferred = (ACTIVE in labels(pr) or (state.get("head") == head

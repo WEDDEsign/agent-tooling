@@ -9,7 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-from policy import GATE, MARKER, dedicated_app
+from policy import GATE, STATE, MARKER, dedicated_app
 
 
 class GitHubHTTPError(RuntimeError):
@@ -90,7 +90,7 @@ class GitHub:
 
     def owned(self, check, number):
         return (dedicated_app(self.app_id) and check.get("app", {}).get("id") == self.app_id
-                and check.get("name") == GATE
+                and check.get("name") == STATE
                 and check.get("external_id") == f"review-first:{self.repo}:{number}")
 
     def checkpoint(self, head, number):
@@ -132,14 +132,14 @@ class GitHub:
         return {}, None
 
     def save(self, number, state, checkpoint_id):
-        check_id = self.write_check(number, state["head"], None,
+        check_id = self.write_check(number, state["head"], "neutral",
                                    "Review-first CI: " + state["phase"], state)
         if checkpoint_id != check_id:
             try:
                 self.request(f"issues/{number}/comments", "POST", {"body":
                     f"{MARKER}\ncheck: {check_id}\n"
                     f"Controller state for `{state['head']}` lives in the dedicated App's "
-                    f"[merge-validation check](https://github.com/{self.repo}/runs/{check_id}). "
+                    f"[state checkpoint](https://github.com/{self.repo}/runs/{check_id}). "
                     "This comment is only a pointer; its contents cannot certify validation."})
             except RuntimeError:
                 # State is already durable. A missing locator may repeat initial
@@ -154,18 +154,50 @@ class GitHub:
         else:
             self.request(f"issues/{number}/labels/{quote(name, safe='')}", "DELETE")
 
+    def validation_check(self, head):
+        return max((c for c in self.checks(head)
+                    if dedicated_app(self.app_id) and c.get("app", {}).get("id") == self.app_id
+                    and c.get("name") == GATE
+                    and c.get("external_id") == f"review-first-validation:{self.repo}:{head}"),
+                   key=lambda c: c["id"], default=None)
+
+    def reusable_validation(self, pr):
+        check = self.validation_check(pr["head"]["sha"])
+        if not check or check.get("status") != "completed" or check.get("conclusion") != "success":
+            return False
+        binding = json.loads(check.get("output", {}).get("text") or "{}")
+        return (binding.get("head") == pr["head"]["sha"] and binding.get("base") == pr["base"]["sha"]
+                and binding.get("target") == pr["base"]["ref"]
+                and isinstance(binding.get("pr"), int) and binding["pr"] != pr["number"])
+
     def gate(self, pr, conclusion, text):
-        self.write_check(pr["number"], pr["head"]["sha"], conclusion, text)
+        if not dedicated_app(self.app_id):
+            raise RuntimeError("A dedicated controller App ID is required")
+        # One required gate certifies the commit/base candidate. Another PR's
+        # bookkeeping or in-flight run cannot revoke that successful result.
+        if self.reusable_validation(pr):
+            return
+        head = pr["head"]["sha"]
+        existing = self.validation_check(head)
+        external_id = f"review-first-validation:{self.repo}:{head}"
+        binding = {"head": head, "base": pr["base"]["sha"], "target": pr["base"]["ref"], "pr": pr["number"]}
+        payload = {"name": GATE, "external_id": external_id,
+                   "status": "completed" if conclusion else "in_progress",
+                   "output": {"title": text, "summary": text,
+                              "text": json.dumps(binding) if conclusion == "success" else ""}}
+        if conclusion:
+            payload["conclusion"] = conclusion
+        response = (self.request(f"check-runs/{existing['id']}", "PATCH", payload) if existing else
+                    self.request("check-runs", "POST", {**payload, "head_sha": head}))
+        if (response.get("app", {}).get("id") != self.app_id or response.get("name") != GATE
+                or response.get("external_id") != external_id):
+            raise RuntimeError("GitHub did not write a check owned by the configured App")
 
     def write_check(self, number, head, conclusion, text, state=None):
         if not dedicated_app(self.app_id):
             raise RuntimeError("A dedicated controller App ID is required")
         existing = self.checkpoint(head, number)
-        if state is not None and existing and existing.get("status") == "completed":
-            # Recording notification delivery must not turn a failed gate back
-            # into a pending one. Only gate() changes the validation verdict.
-            conclusion = existing.get("conclusion")
-        payload = {"name": GATE, "status": "completed" if conclusion else "in_progress",
+        payload = {"name": STATE, "status": "completed" if conclusion else "in_progress",
                    "external_id": f"review-first:{self.repo}:{number}",
                    "output": {"title": text, "summary": text}}
         if state is not None:

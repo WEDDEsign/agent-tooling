@@ -4,6 +4,7 @@ import re
 
 BOT = "chatgpt-codex-connector[bot]"
 GATE = "merge-validation"
+STATE = "review-first-state"
 ACTIVE = "review-first-ci-active"
 OPT_IN = "review-first-ci"
 REPING = "awaiting-codex-reping"

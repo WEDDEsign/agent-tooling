@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from controller import Controller
 from github_api import GitHub, GitHubHTTPError
-from policy import GATE, MARKER, protected, eligible, current_review, summary_receipt, BOT
+from policy import GATE, STATE, MARKER, protected, eligible, current_review, summary_receipt, BOT
 from test_review_first import APP, BASE, CONFIG, HEAD, NEXT, REPO, RULES, FakeAPI, Harness, pull
 
 
@@ -19,6 +19,7 @@ class AppStore(FakeAPI, GitHub):
     decode_state = GitHub.decode_state
     owned = GitHub.owned
     write_check = GitHub.write_check
+    reusable_validation = GitHub.reusable_validation
 
     def __init__(self):
         FakeAPI.__init__(self)
@@ -59,7 +60,7 @@ class IdentityTests(unittest.TestCase):
     def test_check_write_must_authenticate_as_the_configured_app(self):
         api = GitHub('unused', REPO, APP)
         check = {'id': 10, 'app': {'id': 15368}, 'name': GATE,
-                 'external_id': f'review-first:{REPO}:1'}
+                 'external_id': f'review-first-validation:{REPO}:{HEAD}'}
         with patch.object(api, 'checks', return_value=[]), patch.object(api, 'request', return_value=check):
             with self.assertRaisesRegex(RuntimeError, 'owned by the configured App'):
                 api.gate(pull(), None, 'Pending')
@@ -88,7 +89,7 @@ class IdentityTests(unittest.TestCase):
             'performed_via_github_app': {'id': 15368},
             'body': '<!-- review-first-ci:v1 -->\n```json\n' + json.dumps(forged) + '\n```'})
         # Even copying the new check format cannot impersonate the App.
-        api.records[999] = {'id': 999, 'name': GATE, 'app': {'id': 15368}, 'head_sha': NEXT,
+        api.records[999] = {'id': 999, 'name': STATE, 'app': {'id': 15368}, 'head_sha': NEXT,
             'external_id': f'review-first:{REPO}:1', 'output': {'text': json.dumps(forged)}}
         api.discussion.append({'id': 1000, 'body': f'{MARKER}\ncheck: 999\n'})
         api.pull['head']['sha'] = NEXT
@@ -98,10 +99,10 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(state['phase'], 'final')
         self.assertNotEqual(state['ticket'], forged['ticket'])
         self.assertEqual(len(api.started), 4, 'Two genuine final workers are dispatched')
-        self.assertEqual(api.records[check_id]['status'], 'in_progress')
+        self.assertEqual(api.validation_check(api.pull['head']['sha'])['status'], 'in_progress')
         api.finish()
         controller.reconcile(1)
-        self.assertEqual(api.records[check_id]['conclusion'], 'success')
+        self.assertEqual(api.validation_check(api.pull['head']['sha'])['conclusion'], 'success')
 
     def test_current_checkpoint_wins_over_replayed_pointers_and_json(self):
         api = AppStore()
@@ -177,7 +178,7 @@ class IdentityTests(unittest.TestCase):
             if phase == 'initial':
                 self.assertTrue(saved['baseline'])
             else:
-                self.assertEqual(api.records[check_id]['conclusion'], 'success')
+                self.assertEqual(api.validation_check(api.pull['head']['sha'])['conclusion'], 'success')
 
     def test_same_commit_prs_keep_their_own_checkpoint_despite_latest_filter(self):
         api = AppStore()
@@ -193,8 +194,55 @@ class IdentityTests(unittest.TestCase):
                 patch.object(api, 'pages', side_effect=check_pages):
             Harness(api, None, 'pilot', CONFIG).reconcile(1)
             self.assertEqual(api.state(api.pull, api.discussion), (state, original_id))
-            self.assertEqual(len(api.records), 2)
+            self.assertEqual(len([c for c in api.records.values() if c['name'] == STATE]), 2)
             self.assertEqual(api.started, [])
+
+    def test_duplicate_pr_bookkeeping_cannot_revoke_a_certified_commit(self):
+        api = AppStore()
+        controller = Harness(api, None, 'pilot', CONFIG)
+        controller.reconcile(1)
+        api.finish()
+        controller.reconcile(1)
+        api.pull['number'] = 2
+        controller.reconcile(2)  # Second PR starts before the first is certified.
+        api.finish()
+        controller.reconcile(2)
+        api.pull['number'] = 1
+        controller.verdict = 'clean'
+        controller.reconcile(1)
+        api.finish()
+        controller.reconcile(1)
+        certified = copy.deepcopy(api.validation_check(HEAD))
+        self.assertEqual(certified['conclusion'], 'success')
+        started = len(api.started)
+        for number in (2, 3):  # Existing pilot and newly opened duplicate both reuse it.
+            api.pull['number'] = number
+            controller.verdict = 'running'
+            controller.reconcile(number)
+            self.assertEqual(api.validation_check(HEAD), certified)
+            self.assertEqual(len(api.started), started)
+        self.assertEqual(len([c for c in api.records.values() if c['name'] == GATE]), 1)
+        api.pull['number'] = 1
+        controller.verdict = 'findings'
+        controller.reconcile(1)
+        self.assertEqual(api.validation_check(HEAD)['status'], 'in_progress')
+        api.pull['number'] = 2
+        self.assertFalse(api.reusable_validation(api.pull), 'Withdrawal invalidates the shared certificate')
+
+    def test_commit_reuse_requires_matching_base_and_non_default_pr_cannot_overwrite_it(self):
+        api = AppStore()
+        api.gate(api.pull, 'success', 'Validated default-branch candidate')
+        certified = copy.deepcopy(api.validation_check(HEAD))
+        api.pull['number'] = 2
+        self.assertTrue(api.reusable_validation(api.pull))
+        api.pull['base']['sha'] = NEXT
+        self.assertFalse(api.reusable_validation(api.pull))
+        api.pull['base']['sha'] = BASE
+        api.pull['base']['ref'] = 'other-target'
+        api.label(2, 'review-first-ci-active', True)
+        Harness(api, None, 'pilot', CONFIG).reconcile(2)
+        self.assertEqual(api.validation_check(HEAD), certified)
+        self.assertNotIn({'name': 'review-first-ci-active'}, api.pull['labels'])
 
     def test_state_cannot_be_imported_from_another_pr_or_app(self):
         api = AppStore()
@@ -214,8 +262,8 @@ class IdentityTests(unittest.TestCase):
         controller.reconcile(1)
         state, check_id = api.state(api.pull, api.comments(1))
         self.assertEqual(state['failure_reported'], state['ticket'])
-        self.assertEqual(api.records[check_id]['conclusion'], 'failure')
-        self.assertEqual(api.records[check_id]['status'], 'completed')
+        self.assertEqual(api.validation_check(api.pull['head']['sha'])['conclusion'], 'failure')
+        self.assertEqual(api.validation_check(api.pull['head']['sha'])['status'], 'completed')
 
     def test_app_state_survives_classic_restore(self):
         api = AppStore()
@@ -227,10 +275,10 @@ class IdentityTests(unittest.TestCase):
         controller.reconcile(1, restore=True)
         state, check_id = api.state(api.pull, api.comments(1))
         self.assertEqual(state['phase'], 'classic')
-        self.assertEqual(api.records[check_id]['status'], 'in_progress')
+        self.assertEqual(api.validation_check(api.pull['head']['sha'])['status'], 'in_progress')
         api.finish()
         controller.reconcile(1)
-        self.assertEqual(api.records[check_id]['conclusion'], 'success')
+        self.assertEqual(api.validation_check(api.pull['head']['sha'])['conclusion'], 'success')
 
     def test_draft_optout_keeps_restore_intent_until_ready(self):
         api = AppStore()
@@ -249,10 +297,10 @@ class IdentityTests(unittest.TestCase):
         state, check_id = api.state(api.pull, api.discussion)
         self.assertEqual(state['phase'], 'classic')
         self.assertEqual(len(api.started), 2)
-        self.assertEqual(api.records[check_id]['status'], 'in_progress')
+        self.assertEqual(api.validation_check(api.pull['head']['sha'])['status'], 'in_progress')
         api.finish()
         controller.reconcile(1)
-        self.assertEqual(api.records[check_id]['conclusion'], 'success')
+        self.assertEqual(api.validation_check(api.pull['head']['sha'])['conclusion'], 'success')
 
     def test_inline_edit_invalidates_a_clean_review_until_new_activation(self):
         review = {'id': 3, 'user': {'login': BOT}, 'commit_id': HEAD,
@@ -330,10 +378,10 @@ class IdentityTests(unittest.TestCase):
             reactions.clear()
             api.finish()
             controller.reconcile(1)
-            self.assertEqual(api.records[check_id]['conclusion'], 'success')
+            self.assertEqual(api.validation_check(api.pull['head']['sha'])['conclusion'], 'success')
             api.discussion.remove(summary)
             controller.reconcile(1)
-            self.assertEqual(api.records[check_id]['status'], 'in_progress')
+            self.assertEqual(api.validation_check(api.pull['head']['sha'])['status'], 'in_progress')
             self.assertEqual(api.state(api.pull, api.discussion)[0]['phase'], 'review')
 
     def test_receipt_cannot_override_changed_summary_activation_or_findings(self):

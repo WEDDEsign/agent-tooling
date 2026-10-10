@@ -20,6 +20,10 @@ successful check; opening it does not revoke validation. Strict up-to-date
 rules still apply, and a changed commit needs fresh validation. Controller
 phase and review bookkeeping remain per PR; this is not a promise to suppress
 every duplicate workflow. Classic PRs retain their existing CI policy.
+The required gate is one App-owned check per commit, bound to the validated
+default-branch base. Other PRs' state writes cannot reset it; the certifying
+PR's withdrawn review still invalidates the shared result. Non-default-target
+PRs cannot publish or replace this certificate.
 
 The consumer supplies a JSON mapping of workflow filenames to test job names.
 Each worker accepts `pr_number`, `expected_head`, `expected_base`, and `ticket`
@@ -114,8 +118,10 @@ completion. Serialize controller invocations. Invoke the same controller from
 the consumer's existing periodic recovery workflow; do not add another polling
 tier. It rereads GitHub rather than trusting stale event snapshots.
 
-Controller state is JSON in the dedicated App's `merge-validation` check
-output, bound to the repository, PR number and head. GitHub restricts check
+Controller state is JSON in a dedicated App-owned `review-first-state` check
+output, bound to the repository, PR number and head. These non-required
+checkpoints finish with a neutral conclusion; only `merge-validation` gates
+the commit. GitHub restricts check
 updates to the creating App; a PR's Actions token cannot change this record.
 Comment bodies are **not** state. A small pointer comment lets the next head
 locate a prior checkpoint; every pointer is dereferenced through the Checks
