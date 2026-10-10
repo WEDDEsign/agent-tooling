@@ -21,6 +21,7 @@ class AppStore(FakeAPI, GitHub):
     owned = GitHub.owned
     write_check = GitHub.write_check
     reusable_validation = GitHub.reusable_validation
+    certified_validation = GitHub.certified_validation
     retire_validation = GitHub.retire_validation
 
     def __init__(self):
@@ -53,8 +54,10 @@ class AppStore(FakeAPI, GitHub):
                     check['completed_at'] = datetime.now(timezone.utc).isoformat()
             return copy.deepcopy(check)
         if path == 'issues/1/comments':
-            self.discussion.append({'id': len(self.discussion) + 1, **copy.deepcopy(data)})
-            return {'id': len(self.discussion)}
+            comment = {'id': len(self.discussion) + 1, 'created_at': '2026-10-10T10:10:00Z',
+                       **copy.deepcopy(data)}
+            self.discussion.append(comment)
+            return copy.deepcopy(comment)
         return FakeAPI.request(self, path, method, data)
 
 
@@ -312,6 +315,102 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(api.started, [], 'No dispatch against an untrusted target')
         controller.reconcile(2)
         self.assertEqual(len(api.started), 2)
+
+    def test_reconciliation_preserves_completion_time_and_expired_workers_restart(self):
+        api = AppStore()
+        controller = Harness(api, None, 'pilot', CONFIG)
+        controller.reconcile(1)
+        api.finish()
+        controller.reconcile(1)
+        controller.verdict = 'clean'
+        controller.reconcile(1)
+        api.finish()
+        controller.reconcile(1)
+        certified = api.validation_check(HEAD)
+        ticket = api.state(api.pull, api.discussion)[0]['ticket']
+        for _ in range(3):
+            controller.reconcile(1)
+            self.assertEqual(api.validation_check(HEAD), certified, 'Sweeps must not renew the certificate')
+        old = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+        for runs in api.jobs.values():
+            for run in runs:
+                run['completed_at'] = old
+        controller.reconcile(1)
+        self.assertNotEqual(api.state(api.pull, api.discussion)[0]['ticket'], ticket)
+        self.assertEqual(len(api.started), 6)
+        self.assertEqual(api.validation_check(HEAD)['status'], 'in_progress')
+        controller.reconcile(1)
+        self.assertEqual(len(api.started), 6, 'Do not redispatch while replacement workers run')
+        api.finish()
+        controller.reconcile(1)
+        self.assertEqual(api.validation_check(HEAD)['conclusion'], 'success')
+
+    def test_reopening_or_restoring_target_requires_a_new_final_ticket(self):
+        for transition in ('closed', 'retargeted'):
+            for finished in (False, True):
+                with self.subTest(transition=transition, finished=finished):
+                    api = AppStore()
+                    controller = Harness(api, None, 'pilot', CONFIG)
+                    controller.reconcile(1)
+                    api.finish()
+                    controller.reconcile(1)
+                    controller.verdict = 'clean'
+                    controller.reconcile(1)
+                    if finished:
+                        api.finish()
+                        controller.reconcile(1)
+                    ticket = api.state(api.pull, api.discussion)[0]['ticket']
+                    if transition == 'closed':
+                        api.pull['state'] = 'closed'
+                    else:
+                        api.pull['base']['ref'] = 'other-target'
+                    controller.reconcile(1)
+                    state, _ = api.state(api.pull, api.discussion)
+                    self.assertEqual(state['phase'], 'review')
+                    self.assertEqual(state['ticket'], '')
+                    api.finish()  # Old runs may finish while the PR is inactive.
+                    api.pull['state'] = 'open'
+                    api.pull['base']['ref'] = 'main'
+                    controller.reconcile(1)
+                    self.assertNotEqual(api.state(api.pull, api.discussion)[0]['ticket'], ticket)
+                    self.assertEqual(len(api.started), 6)
+                    self.assertEqual(api.validation_check(HEAD)['status'], 'in_progress')
+
+    def test_new_gate_activation_invalidates_a_recorded_clean_review_during_final(self):
+        for finished in (False, True):
+            api = AppStore()
+            state = {'version': 2, 'head': HEAD, 'base': BASE, 'opened_head': HEAD,
+                     'phase': 'review', 'baseline': True,
+                     'requested': {'head': HEAD, 'gate_id': 10, 'at': '2026-10-10T10:00:00Z'}}
+            summary = {'id': 40, 'user': {'login': BOT}, 'updated_at': '2026-10-10T10:05:00Z',
+                       'body': '<!-- codex-pull-request-review-summary -->\n'
+                               f'| **Code Review** | **Completed** | `{HEAD[:7]}` | Manual request |'}
+            state['approved_summary'] = summary_receipt(api.pull, state, summary)
+            api.save(1, state, None)
+            api.discussion.append(summary)
+            original_pages = api.pages
+            def pages(path, key=None):
+                if path.endswith('/reactions') or path in ('pulls/1/reviews', 'pulls/1/comments'):
+                    return []
+                return original_pages(path, key)
+            controller = Controller(api, None, 'pilot', CONFIG)
+            controller.reviewer = api
+            with patch.object(api, 'pages', side_effect=pages):
+                controller.reconcile(1)
+                if finished:
+                    api.finish()
+                    controller.reconcile(1)
+                api.label(1, 'awaiting-codex-reping', True)
+                api.events = [{'id': 21, 'event': 'labeled', 'label': {'name': 'awaiting-codex-reping'}}]
+                controller.reconcile(1)
+                saved, _ = api.state(api.pull, api.discussion)
+                self.assertEqual(saved['phase'], 'review')
+                self.assertEqual(saved['requested']['gate_id'], 21)
+                self.assertEqual(api.validation_check(HEAD)['status'], 'in_progress')
+                self.assertNotIn({'name': 'awaiting-codex-reping'}, api.pull['labels'])
+                controller.reconcile(1)
+                self.assertEqual(len([c for c in api.discussion if c.get('body') == '@codex review']), 1)
+                self.assertEqual(len(api.started), 2, 'Old receipt cannot start another final validation')
 
     def test_state_cannot_be_imported_from_another_pr_or_app(self):
         api = AppStore()

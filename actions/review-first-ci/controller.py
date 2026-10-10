@@ -29,6 +29,11 @@ class Controller:
 
     def review(self, pr, state, comments, checkpoint_id=None):
         n = pr["number"]
+        if REPING in labels(pr):
+            activations = [event["id"] for event in self.api.pages(f"issues/{n}/events")
+                           if event.get("event") == "labeled" and event.get("label", {}).get("name") == REPING]
+            if not activations or max(activations) > state.get("requested", {}).get("gate_id", 0):
+                return "missing"  # A newly armed gate supersedes old review evidence immediately.
         args = (pr, state, comments, self.api.pages(f"pulls/{n}/reviews"),
                 self.api.pages(f"pulls/{n}/comments"))
         summaries = [c for c in comments if codex_author(c)
@@ -94,6 +99,8 @@ class Controller:
             results.append(run_result(matching, state["ticket"], jobs))
         if "failure" in results:
             return "failure"
+        if "expired" in results:
+            return "expired"
         return "success" if results and all(r == "success" for r in results) else "pending"
 
     def request_review(self, pr, state, checkpoint_id, verdict):
@@ -216,7 +223,12 @@ class Controller:
             success = checks_pass(self.api.checks(head), other_required if restored else required,
                                   self.api.statuses(pr))
             if restored:
-                success = success and self.result(state) == "success"
+                result = self.result(state)
+                if result == "expired":
+                    self.api.gate(pr, None, "Refreshing expired classic validation")
+                    self.start(pr, state, checkpoint_id, "classic")
+                    return
+                success = success and result == "success"
             if self.unchanged(pr):
                 if success:
                     self.complete(pr, "Classic CI passed")
@@ -235,10 +247,16 @@ class Controller:
             state.update(head=head, base=base, phase="review" if state.get("baseline") else "waiting",
                          ticket="")
             checkpoint_id = self.api.save(number, state, checkpoint_id)
-        self.api.gate(pr, None, "Waiting for review and final validation")
         if pr.get("mergeable_state") in {"dirty", "unknown", "behind"}:
             self.api.gate(pr, None, "Waiting for an up-to-date, mergeable branch")
             return
+        if (state.get("phase") == "final" and self.api.certified_validation(pr)
+                and self.review(pr, state, comments, checkpoint_id) == "clean"
+                and self.result(state) == "success"
+                and checks_pass(self.api.checks(head), other_required, self.api.statuses(pr))
+                and self.unchanged(pr)):
+            return  # Preserve the certificate's original completion time.
+        self.api.gate(pr, None, "Waiting for review and final validation")
         if not state or state.get("phase") in {"classic", "waiting"}:
             state = {"version": 2, "baseline": False, "opened_head": head}
             self.start(pr, state, checkpoint_id, "initial")
@@ -252,6 +270,9 @@ class Controller:
             result = self.result(state)
             if result == "failure":
                 self.failure(pr, state, checkpoint_id)
+                return
+            if result == "expired":
+                self.start(pr, state, checkpoint_id, state["phase"])
                 return
             if result != "success":
                 return

@@ -2,6 +2,7 @@
 
 import hashlib
 import re
+from datetime import datetime, timedelta, timezone
 
 BOT = "chatgpt-codex-connector[bot]"
 GATE = "merge-validation"
@@ -25,6 +26,15 @@ def summary_receipt(pr, state, summary):
 
 def dedicated_app(app_id):
     return isinstance(app_id, int) and app_id > 0 and app_id != 15368
+
+
+def recent_completion(value):
+    try:
+        completed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        age = datetime.now(timezone.utc) - completed
+    except (TypeError, ValueError):
+        return False
+    return timedelta(0) <= age < timedelta(days=7)
 
 
 def trusted_base(pr):
@@ -152,5 +162,7 @@ def run_result(runs, ticket, jobs):
         return "failure"
     actual = {j["name"]: j for j in jobs}
     # An all-skipped workflow is green in Actions, but is not validation.
-    return "success" if all(actual.get(name, {}).get("conclusion") == "success"
-                            for name in latest["expected_jobs"]) else "failure"
+    if not all(actual.get(name, {}).get("conclusion") == "success" for name in latest["expected_jobs"]):
+        return "failure"
+    return "success" if all(recent_completion(actual[name].get("completed_at"))
+                            for name in latest["expected_jobs"]) else "expired"

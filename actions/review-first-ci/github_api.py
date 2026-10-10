@@ -4,13 +4,12 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timedelta, timezone
 from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-from policy import GATE, STATE, MARKER, dedicated_app
+from policy import GATE, STATE, MARKER, dedicated_app, recent_completion
 
 
 class GitHubHTTPError(RuntimeError):
@@ -162,21 +161,20 @@ class GitHub:
                     and c.get("external_id") == f"review-first-validation:{self.repo}:{head}"),
                    key=lambda c: c["id"], default=None)
 
-    def reusable_validation(self, pr):
+    def certified_validation(self, pr):
         check = self.validation_check(pr["head"]["sha"])
         if not check or check.get("status") != "completed" or check.get("conclusion") != "success":
             return False
         binding = json.loads(check.get("output", {}).get("text") or "{}")
         if not (binding.get("head") == pr["head"]["sha"] and binding.get("base") == pr["base"]["sha"]
                 and binding.get("target") == pr["base"]["ref"]
-                and isinstance(binding.get("pr"), int) and binding["pr"] != pr["number"]):
+                and isinstance(binding.get("pr"), int)):
             return False
-        try:
-            completed = datetime.fromisoformat(str(check.get("completed_at", "")).replace("Z", "+00:00"))
-            age = datetime.now(timezone.utc) - completed
-        except (KeyError, TypeError, ValueError):
-            return False
-        if not timedelta(0) <= age < timedelta(days=7):
+        return binding if recent_completion(check.get("completed_at")) else False
+
+    def reusable_validation(self, pr):
+        binding = self.certified_validation(pr)
+        if not binding or binding["pr"] == pr["number"]:
             return False
         source = self.pr(binding["pr"])
         return (source["state"] == "open" and source["head"]["sha"] == binding["head"]
@@ -184,12 +182,18 @@ class GitHub:
 
     def retire_validation(self, pr):
         check = self.validation_check(pr["head"]["sha"])
-        if not check or check.get("conclusion") != "success":
-            return
-        binding = json.loads(check.get("output", {}).get("text") or "{}")
-        if binding.get("pr") == pr["number"]:
+        binding = json.loads((check or {}).get("output", {}).get("text") or "{}")
+        if check and check.get("conclusion") == "success" and binding.get("pr") == pr["number"]:
             # A closing/retargeted duplicate cannot revoke another PR's certificate.
             self.gate(pr, None, "Certifying pull request no longer eligible; fresh validation required")
+        checkpoint = self.checkpoint(pr["head"]["sha"], pr["number"])
+        state = self.decode_state(checkpoint, pr["number"]) if checkpoint else {}
+        if state.get("phase") in {"final", "classic"}:
+            # Reopening/restoring the target must dispatch a new ticket, even
+            # if the old workers finished while this PR was inactive.
+            state.update(phase="review" if state.get("baseline") else "waiting",
+                         ticket="", dispatched=[])
+            self.save(pr["number"], state, checkpoint["id"])
 
     def gate(self, pr, conclusion, text):
         if not dedicated_app(self.app_id):

@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from controller import Controller
@@ -81,6 +82,9 @@ class FakeAPI:
     def reusable_validation(self, _):
         return False
 
+    def certified_validation(self, _):
+        return False
+
     def retire_validation(self, _):
         pass
 
@@ -101,7 +105,8 @@ class FakeAPI:
             return self.events
         run_id = int(path.split("/")[2])
         run = next(r for runs in self.jobs.values() for r in runs if r["id"] == run_id)
-        return [{"name": name, "conclusion": run.get("job_result", run["conclusion"])}
+        return [{"name": name, "conclusion": run.get("job_result", run["conclusion"]),
+                 "completed_at": run["completed_at"]}
                 for name in CONFIG[run["workflow"]]]
 
     def finish(self, conclusion="success", job_result=None):
@@ -111,7 +116,8 @@ class FakeAPI:
                 continue
             run = {"id": sum(map(len, self.jobs.values())) + 20, "workflow": workflow,
                    "display_title": "review-first-" + ticket, "head_sha": payload["inputs"]["expected_base"],
-                   "status": "completed", "conclusion": conclusion, "run_attempt": 1}
+                   "status": "completed", "conclusion": conclusion, "run_attempt": 1,
+                   "completed_at": datetime.now(timezone.utc).isoformat()}
             if job_result:
                 run["job_result"] = job_result
             self.jobs.setdefault(workflow, []).append(run)
