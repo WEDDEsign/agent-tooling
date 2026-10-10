@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from github_api import GitHub
 from policy import (ACTIVE, GATE, REPING, checks_pass, codex_author, current_review, eligible,
-                    labels, protected, required_checks, run_result, trusted_base)
+                    labels, protected, required_checks, run_result, summary_receipt, trusted_base)
 
 
 class Controller:
@@ -27,7 +27,7 @@ class Controller:
         if self.unchanged(pr):
             self.api.gate(pr, "success", message)
 
-    def review(self, pr, state, comments):
+    def review(self, pr, state, comments, checkpoint_id=None):
         n = pr["number"]
         args = (pr, state, comments, self.api.pages(f"pulls/{n}/reviews"),
                 self.api.pages(f"pulls/{n}/comments"))
@@ -41,12 +41,23 @@ class Controller:
                 found += self.api.pages(f"issues/comments/{summary['id']}/reactions")
             return found
 
-        verdict = current_review(*args, reactions())
+        found = reactions()
+        verdict = current_review(*args, found)
         # The summary edit precedes the reaction by a few seconds. Reactions
         # have no Actions event; this short retry avoids an hourly recovery wait.
         if verdict == "finishing":
             time.sleep(10)
-            verdict = current_review(*args, reactions())
+            found = reactions()
+            verdict = current_review(*args, found)
+        if (verdict == "clean" and summary
+                and current_review(pr, state, comments, [], args[4], found) == "clean"):
+            receipt = summary_receipt(pr, state, summary)
+            if state.get("approved_summary") != receipt:
+                # A bot reaction signals review completion; it is not a mutable
+                # approval switch. Persist the authenticated result. Review
+                # changes, findings and summary edits/deletion still invalidate it.
+                state["approved_summary"] = receipt
+                self.api.save(n, state, checkpoint_id)
         return verdict
 
     def start(self, pr, state, checkpoint_id, phase):
@@ -66,6 +77,7 @@ class Controller:
                     "expected_base": state["base"], "ticket": state["ticket"]}})
             state["dispatched"].append(workflow)
             self.api.save(pr["number"], state, checkpoint_id)
+        return True
 
     def result(self, state):
         results = []
@@ -178,14 +190,19 @@ class Controller:
         if restore and self.mode != "classic":
             raise RuntimeError("Set CI_REVIEW_MODE=classic before restoring full CI")
         if not managed:
-            if ACTIVE in labels(pr):
-                self.api.label(number, ACTIVE, False)
-            if restore and (state or ACTIVE in labels(pr)):
+            restored = state.get("phase") == "classic" and state.get("head") == head and state.get("base") == base
+            deferred = (ACTIVE in labels(pr) or (state.get("head") == head
+                        and state.get("phase") in {"initial", "review", "final", "waiting"}))
+            leaving_pilot = (deferred and not restored and trusted_base(pr)
+                             and (pr["head"].get("repo") or {}).get("full_name") == self.api.repo)
+            if (restore and (state or ACTIVE in labels(pr))) or leaving_pilot:
                 state.update(version=2, baseline=False)
                 self.api.gate(pr, None, "Restoring full CI for this head")
-                self.start(pr, state, checkpoint_id, "classic")
+                if self.start(pr, state, checkpoint_id, "classic") and ACTIVE in labels(pr):
+                    self.api.label(number, ACTIVE, False)
                 return
-            restored = state.get("phase") == "classic" and state.get("head") == head and state.get("base") == base
+            if ACTIVE in labels(pr):
+                self.api.label(number, ACTIVE, False)
             success = checks_pass(self.api.checks(head), other_required if restored else required,
                                   self.api.statuses(pr))
             if restored:
@@ -216,7 +233,7 @@ class Controller:
             state = {"version": 2, "baseline": False, "opened_head": head}
             self.start(pr, state, checkpoint_id, "initial")
             return
-        if state["phase"] == "final" and self.review(pr, state, comments) != "clean":
+        if state["phase"] == "final" and self.review(pr, state, comments, checkpoint_id) != "clean":
             # Approval can be withdrawn without a push. An author may resolve
             # or decline findings and re-arm the gate for this same head.
             state.update(phase="review", ticket="")
@@ -231,14 +248,14 @@ class Controller:
             if state["phase"] == "initial":
                 state.update(baseline=True, phase="review")
                 checkpoint_id = self.api.save(number, state, checkpoint_id)
-            elif (self.review(pr, state, comments) == "clean"
+            elif (self.review(pr, state, comments, checkpoint_id) == "clean"
                   and checks_pass(self.api.checks(head), other_required, self.api.statuses(pr))
                   and self.unchanged(pr)):
                 self.complete(pr, "Current review and final validation passed")
                 return
         if state["phase"] == "review":
             self.recover_request(pr, state, comments, checkpoint_id, restore_gate=True)
-            verdict = self.review(pr, state, comments)
+            verdict = self.review(pr, state, comments, checkpoint_id)
             if verdict == "clean":
                 self.start(pr, state, checkpoint_id, "final")
             else:

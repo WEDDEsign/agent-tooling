@@ -167,10 +167,17 @@ class FlowTests(unittest.TestCase):
         self.assertFalse(self.api.data["baseline"])
 
     def test_skipped_test_jobs_never_validate(self):
-        self.controller.reconcile(1)
-        self.api.finish(job_result="skipped")
-        self.controller.reconcile(1)
-        self.assertEqual(self.api.gates[-1][1], "failure")
+        for phase in ("initial", "final"):
+            for result in ("neutral", "skipped"):
+                with self.subTest(phase=phase, result=result):
+                    self.setUp()
+                    if phase == "final":
+                        self.initial()
+                        self.controller.verdict = "clean"
+                    self.controller.reconcile(1)
+                    self.api.finish(job_result=result)
+                    self.controller.reconcile(1)
+                    self.assertEqual(self.api.gates[-1][1], "failure")
 
     def test_new_push_during_final_run_invalidates_result(self):
         self.initial()
@@ -252,6 +259,41 @@ class FlowTests(unittest.TestCase):
         self.controller.reconcile(1, restore=True)
         self.assertEqual(self.api.started, [])
 
+    def test_opt_out_restores_this_heads_deferred_tests_once(self):
+        for opt_out in ("ci-always", "remove-opt-in", "classic-mode"):
+            with self.subTest(opt_out=opt_out):
+                self.setUp()
+                self.initial()
+                for check in self.api.check_results:
+                    check["conclusion"] = "skipped"
+                if opt_out == "ci-always":
+                    self.api.label(1, "ci-always", True)
+                elif opt_out == "remove-opt-in":
+                    self.api.label(1, "review-first-ci", False)
+                else:
+                    self.controller.mode = "classic"
+                self.controller.reconcile(1)
+                self.assertEqual(self.api.data["phase"], "classic")
+                self.assertEqual(len(self.api.started), 4)
+                self.controller.reconcile(1)
+                self.assertIsNone(self.api.gates[-1][1], "Skipped admission jobs cannot clear restoration")
+                self.assertEqual(len(self.api.started), 4, "Do not redispatch on each event")
+                self.api.finish()
+                self.controller.reconcile(1)
+                self.assertEqual(self.api.gates[-1][1], "success")
+
+    def test_native_satisfied_other_checks_do_not_block_final_validation(self):
+        for conclusion in ("neutral", "skipped"):
+            with self.subTest(conclusion=conclusion):
+                self.setUp()
+                self.initial()
+                self.api.check_results[-1]["conclusion"] = conclusion
+                self.controller.verdict = "clean"
+                self.controller.reconcile(1)
+                self.api.finish()
+                self.controller.reconcile(1)
+                self.assertEqual(self.api.gates[-1][1], "success")
+
     def test_rollback_requires_mode_switch_first(self):
         with self.assertRaisesRegex(RuntimeError, "classic"):
             self.controller.reconcile(1, restore=True)
@@ -317,6 +359,12 @@ class PolicyTests(unittest.TestCase):
         current = checks()
         current.append({**current[0], "id": 50, "conclusion": "failure"})
         self.assertFalse(checks_pass(current, {("backend", 15368)}))
+
+    def test_required_checks_match_github_native_conclusions(self):
+        for conclusion in ("success", "neutral", "skipped", "failure", "cancelled", "timed_out", None):
+            current = [{**checks()[0], "conclusion": conclusion}]
+            self.assertEqual(checks_pass(current, {("backend", 15368)}),
+                             conclusion in {"success", "neutral", "skipped"})
 
     def test_required_integration_is_honored_without_assuming_actions(self):
         rules = copy.deepcopy(RULES)

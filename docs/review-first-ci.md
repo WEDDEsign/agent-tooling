@@ -82,6 +82,11 @@ The caller passes its `CI_REVIEW_MODE` repository variable:
   rejects non-default targets; a PR author cannot nominate an unprotected
   feature branch as trusted workflow code.
 
+Opting an active default-branch pilot out starts classic validation for its
+current head, so previously deferred jobs do not wait for another push.
+Unrelated required checks follow GitHub's success/neutral/skipped semantics;
+the controller's initial, final and restored test workers must actually succeed.
+
 `review-first-ci-active` is controller-owned. Pass it as `excluded_label` to
 both the legacy CI-green transport and its scheduled sweep. The author still
 pushes, verifies the new head, replies to findings, and arms
@@ -95,6 +100,12 @@ and no inline findings is a clean result. A submitted approval, standalone
 `APPROVED` verdict, or fixed no-major-issues review on that head also qualifies. No template-driven retry
 is needed. The summary's edit can precede its reaction; reconciliation gives
 that reaction a short opportunity to arrive, then leaves validation pending.
+Once observed, the authenticated summary/reaction result is recorded in the
+App-owned checkpoint, bound to the head, review activation and exact summary.
+The reaction is a completion signal, not a continuing approval switch: removing
+it later does not revoke the recorded review. A changed/deleted summary, new
+findings, dismissed review or new activation invalidates that receipt. This
+avoids relying on reaction-change events, which Actions does not deliver.
 
 ## Events and recovery
 

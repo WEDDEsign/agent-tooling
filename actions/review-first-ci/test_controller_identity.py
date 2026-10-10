@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from controller import Controller
 from github_api import GitHub, GitHubHTTPError
-from policy import GATE, MARKER, protected, eligible, current_review, BOT
+from policy import GATE, MARKER, protected, eligible, current_review, summary_receipt, BOT
 from test_review_first import APP, BASE, CONFIG, HEAD, NEXT, REPO, RULES, FakeAPI, Harness, pull
 
 
@@ -232,6 +232,28 @@ class IdentityTests(unittest.TestCase):
         controller.reconcile(1)
         self.assertEqual(api.records[check_id]['conclusion'], 'success')
 
+    def test_draft_optout_keeps_restore_intent_until_ready(self):
+        api = AppStore()
+        controller = Harness(api, None, 'pilot', CONFIG)
+        api.pull['mergeable_state'] = 'unknown'
+        controller.reconcile(1)  # Current checkpoint exists, dispatch has not begun.
+        api.pull['draft'] = True
+        api.label(1, 'ci-always', True)
+        for check in api.check_results:
+            check['conclusion'] = 'skipped'
+        controller.reconcile(1)
+        self.assertEqual(api.started, [])
+        self.assertIn({'name': 'review-first-ci-active'}, api.pull['labels'])
+        api.pull.update(draft=False, mergeable_state='blocked')
+        controller.reconcile(1)
+        state, check_id = api.state(api.pull, api.discussion)
+        self.assertEqual(state['phase'], 'classic')
+        self.assertEqual(len(api.started), 2)
+        self.assertEqual(api.records[check_id]['status'], 'in_progress')
+        api.finish()
+        controller.reconcile(1)
+        self.assertEqual(api.records[check_id]['conclusion'], 'success')
+
     def test_inline_edit_invalidates_a_clean_review_until_new_activation(self):
         review = {'id': 3, 'user': {'login': BOT}, 'commit_id': HEAD,
                   'submitted_at': '2026-10-10T10:10:00Z', 'state': 'APPROVED', 'body': ''}
@@ -277,6 +299,62 @@ class IdentityTests(unittest.TestCase):
                 return [orphan, reaction] if path.endswith('/reactions') else [orphan]
             with patch.object(api, 'pages', side_effect=pages):
                 self.assertEqual(controller.review(pull(), state, [orphan, summary]), 'clean')
+
+    def test_completed_review_receipt_survives_reaction_removal_but_not_summary_deletion(self):
+        api = AppStore()
+        state = {'version': 2, 'head': HEAD, 'base': BASE, 'opened_head': HEAD,
+                 'phase': 'review', 'baseline': True}
+        check_id = api.save(1, state, None)
+        summary = {'id': 40, 'user': {'login': BOT}, 'updated_at': '2026-10-10T10:05:00Z',
+                   'body': '<!-- codex-pull-request-review-summary -->\n'
+                           f'| **Code Review** | **Completed** | `{HEAD[:7]}` | PR opened |'}
+        api.discussion.append(summary)
+        reactions = []
+        original_pages = api.pages
+        def pages(path, key=None):
+            if path.endswith('/reactions'):
+                return copy.deepcopy(reactions)
+            if path in ('pulls/1/reviews', 'pulls/1/comments'):
+                return []
+            return original_pages(path, key)
+        controller = Controller(api, None, 'pilot', CONFIG)
+        with patch.object(api, 'pages', side_effect=pages), patch('controller.time.sleep'):
+            controller.reconcile(1)
+            self.assertEqual(api.started, [], 'A summary alone cannot certify a clean review')
+            reactions.append({'user': {'login': BOT}, 'content': '+1',
+                              'created_at': '2026-10-10T10:05:01Z'})
+            controller.reconcile(1)
+            saved, _ = api.state(api.pull, api.discussion)
+            self.assertIn('approved_summary', saved)
+            self.assertEqual(saved['phase'], 'final')
+            reactions.clear()
+            api.finish()
+            controller.reconcile(1)
+            self.assertEqual(api.records[check_id]['conclusion'], 'success')
+            api.discussion.remove(summary)
+            controller.reconcile(1)
+            self.assertEqual(api.records[check_id]['status'], 'in_progress')
+            self.assertEqual(api.state(api.pull, api.discussion)[0]['phase'], 'review')
+
+    def test_receipt_cannot_override_changed_summary_activation_or_findings(self):
+        pr = pull()
+        summary = {'id': 40, 'user': {'login': BOT}, 'updated_at': '2026-10-10T10:05:00Z',
+                   'body': '<!-- codex-pull-request-review-summary -->\n'
+                           f'| **Code Review** | **Completed** | `{HEAD[:7]}` | PR opened |'}
+        state = {'opened_head': HEAD}
+        state['approved_summary'] = summary_receipt(pr, state, summary)
+        self.assertEqual(current_review(pr, state, [summary], [], [], []), 'clean')
+        for field, value in [('id', 41), ('updated_at', '2026-10-10T10:06:00Z'),
+                             ('body', summary['body'] + '\nEdited')]:
+            changed = {**summary, field: value}
+            self.assertNotEqual(current_review(pr, state, [changed], [], [], []), 'clean')
+        rearmed = {**state, 'requested': {'head': HEAD, 'id': 42, 'at': '2026-10-10T10:04:00Z'}}
+        self.assertNotEqual(current_review(pr, rearmed, [summary], [], [], []), 'clean')
+        finding = {'user': {'login': BOT}, 'commit_id': HEAD, 'created_at': '2026-10-10T10:06:00Z'}
+        self.assertEqual(current_review(pr, state, [summary], [], [finding], []), 'findings')
+        dismissed = {'id': 43, 'user': {'login': BOT}, 'commit_id': HEAD,
+                     'submitted_at': '2026-10-10T10:06:00Z', 'state': 'DISMISSED'}
+        self.assertEqual(current_review(pr, state, [summary], [dismissed], [], []), 'findings')
 
     def test_runner_interruption_after_claim_recovers_without_a_new_push(self):
         api = FakeAPI()

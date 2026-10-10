@@ -14,6 +14,12 @@ def codex_author(item):
     return (item.get("user") or {}).get("login") == BOT
 
 
+def summary_receipt(pr, state, summary):
+    return {"head": pr["head"]["sha"], "id": summary["id"],
+            "updated_at": summary.get("updated_at"), "body": summary.get("body"),
+            "activation": state.get("requested", {})}
+
+
 def dedicated_app(app_id):
     return isinstance(app_id, int) and app_id > 0 and app_id != 15368
 
@@ -64,7 +70,10 @@ def checks_pass(checks, required, statuses=()):
             return False
         # If a required name exists as both a check and a commit status,
         # GitHub requires both. Success in one must not hide failure in the other.
-        if latest and (latest.get("status") != "completed" or latest.get("conclusion") != "success"):
+        # Match GitHub's native required-check semantics. Controlled validation
+        # workers have a separate, success-only contract in run_result().
+        if latest and (latest.get("status") != "completed"
+                       or latest.get("conclusion") not in {"success", "neutral", "skipped"}):
             return False
         if any(s["state"] != "SUCCESS" for s in contexts):
             return False
@@ -125,7 +134,8 @@ def current_review(pr, state, comments, reviews, inline, reactions):
     thumbs_up = any(codex_author(r) and r["content"] == "+1"
                     and r.get("created_at", "") >= max(since, summary["updated_at"])
                     for r in reactions)
-    return "clean" if thumbs_up and not findings else "findings" if findings else "finishing"
+    recorded = state.get("approved_summary") == summary_receipt(pr, state, summary)
+    return "clean" if (thumbs_up or recorded) and not findings else "findings" if findings else "finishing"
 
 
 def run_result(runs, ticket, jobs):
