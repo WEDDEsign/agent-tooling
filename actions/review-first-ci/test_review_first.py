@@ -267,11 +267,14 @@ class FlowTests(unittest.TestCase):
         self.assertIsNone(self.api.gates[-1][1])
         self.assertEqual(len(self.api.started), 4, "Do not spend another full run before the branch is updated")
 
-    def test_classic_pr_cannot_clear_a_second_prs_gate_on_the_same_commit(self):
-        self.controller.mode = "classic"
+    def test_identical_commit_in_another_pr_does_not_invalidate_final_validation(self):
+        self.initial()
         self.api.duplicate_pr = True
+        self.controller.verdict = "clean"
         self.controller.reconcile(1)
-        self.assertIsNone(self.api.gates[-1][1])
+        self.api.finish()
+        self.controller.reconcile(1)
+        self.assertEqual(self.api.gates[-1][1], "success")
 
     def test_declined_findings_can_be_reviewed_without_an_empty_commit(self):
         self.initial()

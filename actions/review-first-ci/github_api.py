@@ -11,6 +11,12 @@ from urllib.request import Request, urlopen
 from policy import GATE, MARKER, dedicated_app
 
 
+class GitHubHTTPError(RuntimeError):
+    def __init__(self, message, status):
+        super().__init__(message)
+        self.status = status
+
+
 class GitHub:
     def __init__(self, token, repo=None, app_id=0):
         self.token = token
@@ -32,7 +38,7 @@ class GitHub:
                 body = response.read()
                 return json.loads(body) if body else None
         except HTTPError as error:
-            raise RuntimeError(f"GitHub {method} {path.split('?')[0]}: HTTP {error.code}") from None
+            raise GitHubHTTPError(f"GitHub {method} {path.split('?')[0]}: HTTP {error.code}", error.code) from None
         except (URLError, OSError, HTTPException, json.JSONDecodeError) as error:
             # Keep fallback/retry behavior consistent even without an HTTP
             # response. Exception reasons can contain request details.
@@ -113,7 +119,12 @@ class GitHub:
             if match:
                 ids.add(int(match[1]))
         for check_id in sorted(ids, reverse=True):
-            check = self.request(f"check-runs/{check_id}")
+            try:
+                check = self.request(f"check-runs/{check_id}")
+            except GitHubHTTPError as error:
+                if error.status in {403, 404}:
+                    continue  # Untrusted pointer to inaccessible or nonexistent state.
+                raise
             state = self.decode_state(check, pr["number"])
             if state:
                 return state, None  # Save a new head's checkpoint, never edit the old one.

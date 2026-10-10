@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from controller import Controller
-from github_api import GitHub
+from github_api import GitHub, GitHubHTTPError
 from policy import GATE, MARKER, protected, eligible, current_review, BOT
 from test_review_first import APP, BASE, CONFIG, HEAD, NEXT, REPO, RULES, FakeAPI, Harness, pull
 
@@ -111,6 +111,48 @@ class IdentityTests(unittest.TestCase):
         api.pull['head']['sha'] = NEXT
         api.discussion = [{'body': f'{MARKER}\ncheck: {old_id}\n```json\n{{"phase":"final"}}\n```'}]
         self.assertEqual(api.state(api.pull, api.discussion), (current, new_id))
+
+    def test_untrusted_missing_or_inaccessible_pointer_does_not_hide_real_state(self):
+        for status in (403, 404):
+            api = AppStore()
+            state = {'version': 2, 'head': HEAD, 'phase': 'review', 'baseline': True}
+            api.save(1, state, None)
+            api.pull['head']['sha'] = NEXT
+            api.discussion.append({'body': f'{MARKER}\ncheck: 999\n'})
+            request = api.request
+            def with_invalid_pointer(path, method='GET', data=None):
+                if path == 'check-runs/999':
+                    raise GitHubHTTPError('Unavailable check', status)
+                return request(path, method, data)
+            with patch.object(api, 'request', side_effect=with_invalid_pointer):
+                self.assertEqual(api.state(api.pull, api.discussion), (state, None))
+
+    def test_transient_lookup_failure_is_not_treated_as_absent_state(self):
+        api = AppStore()
+        api.discussion = [{'body': f'{MARKER}\ncheck: 999\n'}]
+        with patch.object(api, 'request', side_effect=GitHubHTTPError('Unavailable', 503)):
+            with self.assertRaises(GitHubHTTPError):
+                api.state(api.pull, api.discussion)
+
+    def test_uncomputed_mergeability_preserves_baseline_across_a_push(self):
+        for baseline_passes in (True, False):
+            api = AppStore()
+            controller = Harness(api, None, 'pilot', CONFIG)
+            controller.reconcile(1)
+            api.finish('success' if baseline_passes else 'failure')
+            controller.reconcile(1)
+            api.pull['head']['sha'] = NEXT
+            api.pull['mergeable_state'] = 'unknown'
+            controller.reconcile(1)
+            state, _ = api.state(api.pull, api.comments(1))
+            self.assertEqual(state['baseline'], baseline_passes)
+            self.assertEqual(state['head'], NEXT)
+            self.assertEqual(len(api.started), 2)
+            api.pull['mergeable_state'] = 'blocked'
+            controller.reconcile(1)
+            self.assertEqual(len(api.started), 2 if baseline_passes else 4)
+            state, _ = api.state(api.pull, api.comments(1))
+            self.assertEqual(state['phase'], 'review' if baseline_passes else 'initial')
 
     def test_state_cannot_be_imported_from_another_pr_or_app(self):
         api = AppStore()

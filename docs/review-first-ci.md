@@ -14,6 +14,13 @@ review of the current head starts final full validation. `merge-validation`
 passes only after those exact runs, every other required check, and the current
 review are successful. The controller never merges.
 
+GitHub required checks certify a commit, not a separate approval for each PR.
+A second PR at the identical commit targeting the default branch may reuse a
+successful check; opening it does not revoke validation. Strict up-to-date
+rules still apply, and a changed commit needs fresh validation. Controller
+phase and review bookkeeping remain per PR; this is not a promise to suppress
+every duplicate workflow. Classic PRs retain their existing CI policy.
+
 The consumer supplies a JSON mapping of workflow filenames to test job names.
 Each worker accepts `pr_number`, `expected_head`, `expected_base`, and `ticket`
 as workflow-dispatch inputs and uses `review-first-TICKET` as its run name.
@@ -58,6 +65,13 @@ with strict up-to-date checks. The shared GitHub Actions identity is not a
 valid source for this gate. Preserve every existing required check. Admission falls
 back to normal CI if these prerequisites cannot be established.
 
+Before opting in, create any missing repository labels: `review-first-ci`,
+`review-first-ci-active`, and `ci-always`. Also provision the existing review
+transport's `awaiting-codex-reping` and `codex-round-1` through `codex-round-6`
+labels (or its larger configured range). The controller associates labels;
+it does not create repository label definitions. Only the controller applies
+`review-first-ci-active` to PRs.
+
 The caller passes its `CI_REVIEW_MODE` repository variable:
 
 - Empty, `classic`, or unrecognized: existing CI on every push.
@@ -84,7 +98,7 @@ that reaction a short opportunity to arrive, then leaves validation pending.
 
 ## Events and recovery
 
-Reconcile on PR updates, Codex summary creation/edits, review events, and worker
+Reconcile on PR updates, Codex summary creation/edits/deletion, review events, and worker
 completion. Serialize controller invocations. Invoke the same controller from
 the consumer's existing periodic recovery workflow; do not add another polling
 tier. It rereads GitHub rather than trusting stale event snapshots.

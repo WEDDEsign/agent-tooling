@@ -22,13 +22,9 @@ class Controller:
                 and now["base"]["sha"] == pr["base"]["sha"] and not now.get("draft"))
 
     def complete(self, pr, message):
-        # Check runs belong to a commit, not a PR. A classic PR must not turn
-        # the same commit's pilot gate green through a second branch/base.
-        peers = [p for p in self.api.pages(f"commits/{pr['head']['sha']}/pulls")
-                 if p["state"] == "open" and p["head"]["sha"] == pr["head"]["sha"]]
-        if len(peers) != 1 or peers[0]["number"] != pr["number"]:
-            self.api.gate(pr, None, "Validation needs one open PR for this commit")
-        elif self.unchanged(pr):
+        # Required checks certify a commit. Opening another PR at that exact
+        # commit does not revoke its validation; PR identity is not a merge gate.
+        if self.unchanged(pr):
             self.api.gate(pr, "success", message)
 
     def review(self, pr, state, comments):
@@ -204,21 +200,22 @@ class Controller:
             raise RuntimeError("Validation workflow/job configuration is empty or malformed")
         if ACTIVE not in labels(pr):
             self.api.label(number, ACTIVE, True)
+        moved = state and (state.get("head") != head or state.get("base") != base)
+        if moved:
+            # Carry the baseline before creating a current-head gate, including
+            # when GitHub has not computed mergeability yet. An empty gate is
+            # authoritative and would otherwise hide the prior checkpoint.
+            state.update(head=head, base=base, phase="review" if state.get("baseline") else "waiting",
+                         ticket="")
+            checkpoint_id = self.api.save(number, state, checkpoint_id)
         self.api.gate(pr, None, "Waiting for review and final validation")
         if pr.get("mergeable_state") in {"dirty", "unknown", "behind"}:
             self.api.gate(pr, None, "Waiting for an up-to-date, mergeable branch")
             return
-        if not state or state.get("phase") == "classic":
+        if not state or state.get("phase") in {"classic", "waiting"}:
             state = {"version": 2, "baseline": False, "opened_head": head}
             self.start(pr, state, checkpoint_id, "initial")
             return
-        moved = state.get("head") != head or state.get("base") != base
-        if moved:
-            if not state.get("baseline"):
-                self.start(pr, state, checkpoint_id, "initial")
-                return
-            state.update(head=head, base=base, phase="review", ticket="")
-            checkpoint_id = self.api.save(number, state, checkpoint_id)
         if state["phase"] == "final" and self.review(pr, state, comments) != "clean":
             # Approval can be withdrawn without a push. An author may resolve
             # or decline findings and re-arm the gate for this same head.
