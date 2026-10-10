@@ -3,6 +3,7 @@ import copy
 import json
 import unittest
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 from controller import Controller
 from github_api import GitHub, GitHubHTTPError
@@ -153,6 +154,47 @@ class IdentityTests(unittest.TestCase):
             self.assertEqual(len(api.started), 2 if baseline_passes else 4)
             state, _ = api.state(api.pull, api.comments(1))
             self.assertEqual(state['phase'], 'review' if baseline_passes else 'initial')
+
+    def test_failed_pointer_publication_does_not_strand_validation_dispatch(self):
+        for phase in ('initial', 'final'):
+            api = AppStore()
+            controller = Harness(api, None, 'pilot', CONFIG)
+            controller.verdict = 'clean'
+            state = {'version': 2, 'baseline': phase == 'final', 'opened_head': HEAD}
+            request = api.request
+            def fail_pointer(path, method='GET', data=None):
+                if path == 'issues/1/comments' and method == 'POST':
+                    raise GitHubHTTPError('Comment service unavailable', 503)
+                return request(path, method, data)
+            with patch.object(api, 'request', side_effect=fail_pointer), self.assertLogs(level='WARNING'):
+                controller.start(api.pull, state, None, phase)
+            saved, check_id = api.state(api.pull, [])
+            self.assertEqual(saved['dispatched'], list(CONFIG))
+            self.assertEqual(len(api.started), 2)
+            api.finish()
+            controller.reconcile(1)
+            saved, _ = api.state(api.pull, [])
+            if phase == 'initial':
+                self.assertTrue(saved['baseline'])
+            else:
+                self.assertEqual(api.records[check_id]['conclusion'], 'success')
+
+    def test_same_commit_prs_keep_their_own_checkpoint_despite_latest_filter(self):
+        api = AppStore()
+        state = {'version': 2, 'head': HEAD, 'base': BASE, 'phase': 'review', 'baseline': True}
+        original_id = api.save(1, state, None)
+        api.save(2, state, None)
+        def check_pages(path, key=None):
+            records = list(api.records.values())
+            if parse_qs(urlsplit(path).query).get('filter') != ['all']:
+                records = [max(records, key=lambda c: c['id'])]
+            return copy.deepcopy(records)
+        with patch.object(api, 'checks', side_effect=lambda head: GitHub.checks(api, head)), \
+                patch.object(api, 'pages', side_effect=check_pages):
+            Harness(api, None, 'pilot', CONFIG).reconcile(1)
+            self.assertEqual(api.state(api.pull, api.discussion), (state, original_id))
+            self.assertEqual(len(api.records), 2)
+            self.assertEqual(api.started, [])
 
     def test_state_cannot_be_imported_from_another_pr_or_app(self):
         api = AppStore()

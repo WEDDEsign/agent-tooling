@@ -1,6 +1,7 @@
 """Small GitHub adapter; secrets stay in authorization headers, never output."""
 
 import json
+import logging
 import os
 import re
 from http.client import HTTPException
@@ -62,7 +63,7 @@ class GitHub:
         return self.pages("rules/branches/" + quote(pr["base"]["ref"], safe=""))
 
     def checks(self, head):
-        return self.pages(f"commits/{head}/check-runs", "check_runs")
+        return self.pages(f"commits/{head}/check-runs?filter=all", "check_runs")
 
     def statuses(self, pr):
         # Status.contexts is GitHub's current set (not the REST status history).
@@ -134,11 +135,17 @@ class GitHub:
         check_id = self.write_check(number, state["head"], None,
                                    "Review-first CI: " + state["phase"], state)
         if checkpoint_id != check_id:
-            self.request(f"issues/{number}/comments", "POST", {"body":
-                f"{MARKER}\ncheck: {check_id}\n"
-                f"Controller state for `{state['head']}` lives in the dedicated App's "
-                f"[merge-validation check](https://github.com/{self.repo}/runs/{check_id}). "
-                "This comment is only a pointer; its contents cannot certify validation."})
+            try:
+                self.request(f"issues/{number}/comments", "POST", {"body":
+                    f"{MARKER}\ncheck: {check_id}\n"
+                    f"Controller state for `{state['head']}` lives in the dedicated App's "
+                    f"[merge-validation check](https://github.com/{self.repo}/runs/{check_id}). "
+                    "This comment is only a pointer; its contents cannot certify validation."})
+            except RuntimeError:
+                # State is already durable. A missing locator may repeat initial
+                # validation after a push, but must not strand this dispatch.
+                logging.warning("Checkpoint pointer publication failed; current-head state is saved. "
+                                "A later push may need initial validation again.")
         return check_id
 
     def label(self, number, name, add):
