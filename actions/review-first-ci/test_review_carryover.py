@@ -17,6 +17,12 @@ def summary(head=HEAD):
                     f"| **Code Review** | **Completed** | `{head[:7]}` | PR opened |"}
 
 
+def pull_at(head, api):
+    pr = copy.deepcopy(api.pull)
+    pr["head"]["sha"] = head
+    return pr
+
+
 class CarryAPI(FakeAPI):
     def __init__(self):
         super().__init__()
@@ -96,6 +102,34 @@ class CarryoverTests(unittest.TestCase):
         self.api.pull["labels"].append({"name": REPING})
         self.api.events = [{"id": 7, "event": "labeled", "label": {"name": REPING}}]
         self.assertEqual(self.verdict(state), "missing")
+
+    def test_review_of_an_intervening_head_ends_the_carry_over(self):
+        state = self.reviewed_then_updated()
+        state["reviewed"]["at"] = "2026-10-10T10:06:00Z"
+        self.api.inline.append({"user": {"login": BOT}, "commit_id": "e" * 40,
+                                "created_at": "2026-10-10T10:20:00Z", "updated_at": "2026-10-10T10:20:00Z"})
+        self.assertEqual(self.verdict(state), "missing", "A revert must not hide an intervening finding")
+
+    def test_a_later_review_request_ends_the_carry_over(self):
+        state = self.reviewed_then_updated()
+        state["requested"] = {"head": "e" * 40, "gate_id": 8, "id": 9, "at": "2026-10-10T10:20:00Z"}
+        self.assertEqual(self.verdict(state), "missing")
+
+    def test_patchless_files_never_carry(self):
+        self.api.files[0].pop("patch")
+        state = {"opened_head": HEAD}
+        self.assertEqual(self.verdict(state), "clean")
+        self.assertNotIn("reviewed", state)
+        self.api.update_base()
+        self.assertEqual(self.verdict(state), "missing")
+
+    def test_digest_is_not_recorded_when_the_head_moves_mid_read(self):
+        state = {"opened_head": HEAD}
+        moved = copy.deepcopy(self.api.pull)
+        moved["head"]["sha"] = NEXT
+        with patch.object(self.api, "pr", return_value=moved):
+            self.assertEqual(self.controller.review(pull_at(HEAD, self.api), state, self.api.comments(1)), "clean")
+        self.assertNotIn("reviewed", state)
 
     def test_reconcile_runs_final_validation_without_another_review_round(self):
         self.controller.reconcile(1)

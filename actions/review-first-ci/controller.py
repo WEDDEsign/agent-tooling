@@ -70,6 +70,7 @@ class Controller:
                 # Everything needed to re-check this review later, plus the PR
                 # diff it covered, so a base update can carry it (carried()).
                 state["reviewed"] = {"head": pr["head"]["sha"], "diff": diff,
+                                     "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                                      "requested": state.get("requested", {}),
                                      "opened_head": state.get("opened_head"),
                                      "approved_summary": state.get("approved_summary")}
@@ -92,8 +93,17 @@ class Controller:
         head = pr["head"]["sha"]
         if not reviewed.get("diff") or reviewed.get("head") == head:
             return False
-        if any(codex_author(item) and item.get("commit_id") == head for item in [*reviews, *inline]):
-            return False  # Codex has spoken on this head; its own verdict governs.
+        if state.get("requested", {}) != reviewed.get("requested") or state.get("request_intent"):
+            return False  # A review was asked for since; its result governs.
+        since = reviewed.get("at", "")
+        for item in [*reviews, *inline]:
+            stamp = max(item.get("submitted_at") or "", item.get("created_at") or "",
+                        item.get("updated_at") or "")
+            if codex_author(item) and (item.get("commit_id") == head or (
+                    item.get("commit_id") != reviewed["head"] and stamp >= since)):
+                # Codex has spoken on this head, or on an intervening one whose
+                # findings a revert could otherwise hide behind the old digest.
+                return False
         original = {**pr, "head": {**pr["head"], "sha": reviewed["head"]}}
         prior = {"requested": reviewed.get("requested") or {}, "opened_head": reviewed.get("opened_head"),
                  "approved_summary": reviewed.get("approved_summary")}

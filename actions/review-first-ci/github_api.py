@@ -91,13 +91,17 @@ class GitHub:
 
         Exact patch text, hunk positions included: a base update that touches
         anything near the PR's lines changes the digest, which only costs a
-        fresh review. Unlisted (3,000+) files never produce a digest.
+        fresh review. Unlisted (3,000+) files, a patchless (binary or
+        oversized) file, or a head that moved while the files were read never
+        produce a digest: none of them can show the diff is unchanged.
         """
         files = self.pages(f"pulls/{int(pr['number'])}/files")
-        if len(files) != pr.get("changed_files"):
+        if len(files) != pr.get("changed_files") or any("patch" not in f for f in files):
+            return None
+        if self.pr(pr["number"])["head"]["sha"] != pr["head"]["sha"]:
             return None
         entries = sorted([f["filename"], f.get("previous_filename") or "", f.get("status") or "",
-                          f["patch"] if "patch" in f else "blob:" + str(f.get("sha"))] for f in files)
+                          f["patch"]] for f in files)
         return hashlib.sha256(json.dumps(entries).encode("utf-8")).hexdigest()
 
     def comments(self, number):

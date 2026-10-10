@@ -45,9 +45,11 @@ The controller records a digest of the PR's files and patches with each clean
 review; a later head with the identical digest goes straight to final
 validation instead of spending another review round. The original review is
 re-evaluated live each time, so dismissal, summary edits or new findings still
-withdraw it, and any Codex review or inline comment on the new head, a newly
-armed review gate, a conflict resolution, or a base change near the PR's lines
-needs a fresh review as before. Final validation always reruns on the new head.
+withdraw it. A fresh review is still needed after any later review request
+or newly armed gate, any Codex review or inline comment on the new head or an
+intervening one, a conflict resolution, a base change near the PR's lines, or a
+binary/oversized file whose patch GitHub omits. Final validation always reruns
+on the new head.
 
 `admit` and `verify-checkout` need read-only repository access. `reconcile`
 requires an installation token from a **dedicated GitHub App**, with
