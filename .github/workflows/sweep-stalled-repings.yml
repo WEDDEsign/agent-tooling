@@ -363,11 +363,11 @@ jobs:
                     [.[][] | select(.body | contains("<!-- codex-autopilot:hard-stop -->"))
                            | select($since == "" or .created_at > $since)] | length')
               if [ "${escalated}" = "0" ]; then
-                gh label create loop-stuck \
+                gh label create loop-stuck --repo "${REPO}" \
                   --color B60205 \
                   --description "Codex review autopilot exceeded round ${HARDSTOP_ROUND} — human intervention required" \
                   2>/dev/null || true
-                gh pr edit "${pr}" --repo "${REPO}" --add-label loop-stuck
+                gh api -X POST "repos/${REPO}/issues/${pr}/labels" -f "labels[]=loop-stuck" >/dev/null
                 GH_TOKEN="${CEREMONY_PAT}" gh pr comment "${pr}" --repo "${REPO}" \
                   --body "${ESCALATION_HANDLE} — Codex review autopilot has reached **round ${round}** on this PR. The hard-stop threshold (${HARDSTOP_ROUND}) has been crossed; not posting the Codex review trigger.
 
@@ -384,7 +384,7 @@ jobs:
                 # comment exists, but a human may have removed the label without
                 # re-triggering, and this branch is only reached while the gate is
                 # still unsatisfied.
-                gh pr edit "${pr}" --repo "${REPO}" --add-label loop-stuck 2>/dev/null || true
+                gh api -X POST "repos/${REPO}/issues/${pr}/labels" -f "labels[]=loop-stuck" >/dev/null 2>&1 || true
                 note "| #${pr} | ⛔ round ${round} — hard stop, already escalated |"
               fi
               continue

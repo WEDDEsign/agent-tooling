@@ -122,11 +122,11 @@ jobs:
             echo "PR #${PR_NUMBER} became draft before hard-stop escalation — standing down."
             exit 0
           fi
-          gh label create loop-stuck \
+          gh label create loop-stuck --repo "${REPO}" \
             --color B60205 \
             --description "Codex review autopilot exceeded round ${HARDSTOP_ROUND} — human intervention required" \
             2>/dev/null || true
-          gh pr edit "${PR_NUMBER}" --repo "${REPO}" --add-label loop-stuck
+          gh api -X POST "repos/${REPO}/issues/${PR_NUMBER}/labels" -f "labels[]=loop-stuck" >/dev/null
           gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${ESCALATION_HANDLE} — Codex review autopilot has reached **round ${ROUND}** on this PR and Codex just submitted another review (${REVIEW_URL}). The hard-stop threshold (${HARDSTOP_ROUND}) has been crossed; not waking Claude.
 
           The \`loop-stuck\` label has been added. To resume the autopilot remove that label and the next Codex review will wake Claude again, or close the loop manually."
