@@ -56,8 +56,8 @@ Each scheduled run should:
 - Treat a draft PR as an inactive review loop. Poll only enough state to notice
   that it became ready; do not run the no-verdict timer, advance a round, arm a
   gate, or request review while it is draft. If it became draft while a gate was
-  armed, disarm it and settle any in-flight CI-green or sweep claim using the
-  stop procedure below. On the ready transition, record that event as the
+  armed, disarm it and settle any in-flight CI-green, sweep, or review-first
+  controller claim using the stop procedure below. On the ready transition, record that event as the
   activation boundary and use its event ID as a fresh same-head review key.
   If automatic Codex review is already running, track it; otherwise request
   once after transport checks pass.
@@ -155,10 +155,14 @@ Each scheduled run should:
   Immediately before posting, re-read PR state and draft status, live head
   branch ref and SHA, owner labels, mergeability, transport checks, trigger
   comments, live Codex requests and running bot summary, submitted reviews,
-  top-level comments, inline threads, and reviewer request/removal events.
-  Apply those events chronologically before authenticating new feedback or
-  approval. Require an open, ready, mergeable PR with the Codex owner signal,
-  the chosen head, green transport checks, no terminal verdict, and no armed
+  top-level comments, inline threads, and reviewer request/removal events. In
+  review-first mode, refresh summary reactions and the authenticated App-owned
+  controller checkpoint, including its approval receipt and carry-over state;
+  a summary can gain a completion reaction without a comment edit. Apply all
+  these events chronologically before authenticating new feedback or approval.
+  Require an open, ready, mergeable PR with the Codex owner signal, the chosen
+  head, green transport checks, no terminal verdict or controller-recognized
+  clean carry-over, and no armed
   gate, claimant, or equivalent request. If any condition changed, classify
   the new events and restart or stop; do not post from the old snapshot.
   In classic direct mode, post only a standalone `@codex review` comment;
@@ -187,14 +191,20 @@ Each scheduled run should:
   retry after CI has already completed.
   For an ordinary new head in a classic-mode repository with an
   `awaiting-codex-reping` CI gate, push the fix, re-read the head, advance
-  `codex-round-N` exactly once for the handled review, and arm the gate. Arm promptly, but if CI has already
-  completed, dispatch the configured sweep when authorized or wait for its
-  scheduled recovery; the past CI completion will not fire again. The green-CI
+  `codex-round-N` exactly once for the handled review. Immediately before
+  arming the gate, re-read PR state, draft status, live branch ref and SHA,
+  owner labels, mergeability, and transport checks. Require the same open,
+  ready, mergeable, Codex-owned head with green transport checks. If ownership
+  disappeared, enter the full stop procedure; if the head changed, restart.
+  Only then arm the gate. Arm promptly, but if CI has already completed,
+  dispatch the configured sweep when authorized or wait for its scheduled
+  recovery; the past CI completion will not fire again. The green-CI
   workflow rechecks the head and required review-transport checks after it
   claims the label. Its label claim prevents another gated trigger; the task
   must not post a direct trigger while that gate is armed or being claimed.
-  After arming, re-read the head, gate label, and workflow-produced triggers;
-  if the head moved, disarm the stale gate and restart. Some unreviewed pushes
+  After arming, re-read the head, owner signal, gate label, and workflow-produced
+  triggers; if the head moved, disarm the stale gate and restart. If ownership
+  disappeared, enter the full stop procedure. Some unreviewed pushes
   require a gate without a new round.
   In a repository without that gate, use the direct procedure after CI is
   green. Absent means round zero; remove the previous round label and apply
@@ -222,10 +232,10 @@ user's decision. Before pausing any Codex-owned PR, including one that just clos
   all in-flight CI-green runs that could target this PR (including runs for
   earlier heads), all in-flight sweeps repository-wide, and any configured
   review-first controller run or durable current-head `request_intent` on an
-  open PR. On a closed or merged PR, settle live runs and any inbound trigger,
-  then disregard a stored `request_intent`; the controller may leave it behind
-  because terminal reconciliation does not clear state. Do not wait for that
-  intent to disappear or restore its gate. Older CI-green runs can restore a
+  open, ready PR. On a closed, merged, or draft PR, settle live runs and any
+  inbound trigger, then disregard a stored `request_intent`: it cannot deliver
+  while the PR is inactive, and the controller may leave it behind. Do not wait
+  for that intent to disappear or restore its gate. Older CI-green runs can restore a
   gate after a head move; sweeps and controllers
   may attach to the default branch. A missing label and absent trigger do not prove that removal won: a run may already have
   claimed the label and be about to post. Wait for those runs to settle, then
