@@ -42,15 +42,10 @@ Immediately after opening or adopting a Codex-owned PR:
    check's time as that head's fallback boundary. This boundary makes a later
    comment-based approval attributable to the current head and starts the
    no-verdict timer; never accept a pre-adoption approval signal against it.
-   If that leaves only a rejected pre-boundary approval and no review request
-   in flight, allow one adoption re-review on the same head after the
-   review-transport checks pass. Post one bare trigger, immediately re-read
-   the head, and classify any head race as for the content-free retry below.
-   Record the trigger ID and time as the new boundary for the commit it
-   actually requests, and restart that commit's no-verdict timer. Track this
-   separately from the ordinary per-head request and the content-free retry,
-   so the
-   once-per-head rule cannot block the adoption review or duplicate it.
+   If that leaves only a rejected pre-boundary approval, mark one adoption
+   re-review for this head. Track it separately from the ordinary per-head
+   request and the content-free retry. Submit it through the common request
+   procedure below, which rechecks the head, checks, and live requests.
 
 Each scheduled run should:
 
@@ -59,8 +54,7 @@ Each scheduled run should:
   gate, or request review while it is draft. On the ready transition, record
   that event as the initial activation boundary and resume the normal loop.
 - Query the PR state, mergeability, current head SHA, review-transport and
-  merge-only checks, all
-  submitted reviews (including `lastEditedAt`), top-level PR conversation
+  merge-only checks, all submitted reviews (including `lastEditedAt`), top-level PR conversation
   comments (including author, association, and `updatedAt`), and all inline
   review threads and comments (including each comment's `updatedAt`). Also
   query the PR timeline's `ReviewRequestedEvent` and
@@ -107,48 +101,45 @@ Each scheduled run should:
   verify
   them, push, and reply to each addressed thread with the fix and commit SHA.
   Follow the repository's own author-side review rules for round caps and scope.
-- A non-approving Codex review with no top-level finding and no inline finding
-  is a content-free pass, not approval. Record its review ID, then allow one
-  exceptional retry on the same head even though that head was already
-  requested. Track the retry separately from ordinary requested-head state and
-  restart the no-verdict timer from the retry trigger's activation boundary.
-  First re-read the head and compare it with the content-free review's
-  reviewed commit. If they differ, treat that verdict as stale and use the
-  normal transport for the new head without spending the retry. Wait for the
-  target head's review-transport checks to pass, then immediately re-read the
-  head, checks, existing triggers, and in-flight review requests. If the head
-  or checks changed, do not post; re-evaluate them. If a same-head retry
-  trigger or request was created after that content-free verdict, track it
-  without posting. Otherwise post one standalone `@codex review` comment for
-  this exceptional same-head retry. Immediately re-read the head after
-  posting. If it moved, leave the old head's retry unused and track the trigger as an
-  in-flight request until its reviewed commit is known. If it targets the new
-  head, require that head's review-transport checks to pass and do not arm a
-  duplicate gate; if it targets the old head, treat it as stale and use the
-  normal gate for the new head. Do not route the retry through a label-only
-  CI gate that may wait for the next push or sweep, and do not advance the
-  review round. If the retry is also content-free, pause and ask the user
-  instead of polling forever.
-- Use exactly one repository-configured transport for the next Codex review.
-  In a repository with an `awaiting-codex-reping` CI gate, push the fix first,
-  re-read the new head, then advance the durable `codex-round-N` label and arm
-  the gate for that new head before letting the green-CI workflow post the bare
-  trigger. Immediately re-read the head, gate label, and workflow-produced
-  triggers after arming; if the head moved, disarm the stale gate and restart
-  this sequence for the new head. Record whether this gate activation advanced
-  the counter; some unreviewed pushes require a gate without representing a new
-  review round. In a repository without that gate, advance
-  the round after the fix head is green and let the originating task post the
-  exact bare trigger itself; never embed the trigger in prose, because a mixed
-  comment enters Codex action mode. Absent means round zero; remove the previous
-  label, create/apply `codex-round-{N+1}` exactly once for the handled review,
-  and do not request another review when the counter is already 25.
-  Immediately before either transport claims the request, re-read both the head
-  and the latest review-transport check states; abort if either changed.
-  Record the resulting trigger comment ID and creation time as this head's activation
-  boundary. Apart from the single content-free retry and one adoption
-  re-review after a rejected pre-boundary approval, request exactly once per
-  head. If checks fail, diagnose and fix failures caused by the PR first.
+- A non-approving Codex review with no top-level or inline finding is a
+  content-free pass, not approval. Record its review ID. If its reviewed commit
+  differs from a fresh head, treat it as stale and use the ordinary new-head
+  path. Otherwise mark one exceptional retry keyed by that review ID and head.
+  A second content-free response on the same head is a stop for the user.
+- Use one request procedure for an ordinary new head, an adoption re-review,
+  and a content-free retry. Keep a ledger key of (head SHA, reason, source
+  review ID or adoption boundary). A request already in flight for that key
+  counts as requested; never issue a duplicate. Wait for any other live review
+  request on the same head to finish before considering another.
+  For direct requests, wait for the configured review-transport checks to pass,
+  then immediately re-read the head, check states, trigger comments, pending
+  review requests, and gate label. If the head or checks changed, restart this
+  procedure. If a request for the key appeared, track it without posting.
+  Post only a standalone `@codex review` comment; prose with the trigger enters
+  Codex action mode. Record its comment ID and creation time as the activation
+  boundary and restart the no-verdict timer.
+  Immediately re-read the head after posting and track the request until its
+  reviewed commit is known. If the head moved, do not spend an old-head retry
+  on the new head. If the review targets the new head, require its transport
+  checks to pass and do not arm a duplicate gate; if it targets the old head,
+  treat it as stale and use the normal new-head gate.
+  A content-free retry and an adoption re-review use this direct transport
+  after green checks, even if the repository normally uses a CI gate; they do
+  not advance the round counter. In particular, do not leave a label-only gate
+  armed for a same-head retry after CI has already completed.
+  For an ordinary new head in a repository with an `awaiting-codex-reping` CI
+  gate, push the fix, re-read the head, advance `codex-round-N` exactly once
+  for the handled review, and arm the gate before CI completes. The green-CI
+  workflow rechecks the head and required review-transport checks after it
+  claims the label. Its label claim prevents another gated trigger; the task
+  must not post a direct trigger while that gate is armed or being claimed.
+  After arming, re-read the head, gate label, and workflow-produced triggers; if the head moved, disarm the stale
+  gate and restart. Some unreviewed pushes require a gate without a new round.
+  In a repository without that gate, use the direct procedure after CI is
+  green. Absent means round zero; remove the previous round label and apply
+  `codex-round-{N+1}` only once for an addressed review. Do not request another
+  review when the counter is already 25 or the repository's lower hard stop
+  applies. Diagnose PR-caused check failures before requesting review.
 - Treat a merge conflict that prevents review-transport checks from starting,
   a cancelled or timed-out review-transport check, and a review-transport
   status that remains missing as recovery states rather than ordinary waiting.
