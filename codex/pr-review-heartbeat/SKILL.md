@@ -42,20 +42,23 @@ Immediately after opening or adopting a Codex-owned PR:
    check's time as that head's fallback boundary. This boundary makes a later
    comment-based approval attributable to the current head and starts the
    no-verdict timer; never accept a pre-adoption approval signal against it.
-   If that leaves only a rejected pre-boundary approval, mark one adoption
-   re-review for this head. Track it separately from the ordinary per-head
-   request and the content-free retry. Submit it through the common request
-   procedure below, which rechecks the head, checks, and live requests.
+   After classifying existing activity, if no qualifying current-head verdict
+   or live Codex request remains, mark one adoption request for this head. This
+   includes empty review history and a rejected pre-boundary approval. Track
+   it separately from the ordinary per-head request and content-free retry;
+   submit it through the common request procedure below.
 
 Each scheduled run should:
 
 - Treat a draft PR as an inactive review loop. Poll only enough state to notice
   that it became ready; do not run the no-verdict timer, advance a round, arm a
-  gate, or request review while it is draft. On the ready transition, record
-  that event as the initial activation boundary and resume the normal loop.
-- Query the PR state, mergeability, current head SHA, review-transport and
-  merge-only checks, all submitted reviews (including `lastEditedAt`), top-level PR conversation
-  comments (including author, association, and `updatedAt`), and all inline
+  gate, or request review while it is draft. If it became draft while a gate was
+  armed, disarm it and settle any in-flight CI-green or sweep claim using the
+  stop procedure below. On the ready transition, record that event as the
+  initial activation boundary and resume the normal loop.
+- Query the PR state, labels, mergeability, current head SHA, review-transport
+  and merge-only checks, all submitted reviews (including `lastEditedAt`),
+  top-level PR conversation comments (including author, association, and `updatedAt`), and all inline
   review threads and comments (including each comment's `updatedAt`). Also
   query the PR timeline's `ReviewRequestedEvent` and
   `ReviewRequestRemovedEvent` history. Apply those events chronologically to
@@ -68,6 +71,9 @@ Each scheduled run should:
   last-seen resolution state for every thread: a
   resolved-to-unresolved transition is new activity even when the thread
   contains no new comment ID.
+- On every run, require the Codex owner signal (`codex/*` or `codex-only`)
+  before unattended author actions. If it disappeared, disarm any pending gate,
+  pause author work, and coordinate ownership; another author may be active.
 - Apply the repository's approval rules only after authenticating the signal.
   A submitted review supplies its reviewer identity, but a token-bearing
   submitted review still requires authorization: reject the PR author and
@@ -113,12 +119,16 @@ Each scheduled run should:
 - Use one request procedure for an ordinary new head, an adoption re-review,
   and a content-free retry. Keep a ledger key of (head SHA, reason, source
   review ID or adoption boundary). A request already in flight for that key
-  counts as requested; never issue a duplicate. Wait for any other live review
-  request on the same head to finish before considering another.
-  For direct requests, wait for the configured review-transport checks to pass,
-  then immediately re-read the head, check states, trigger comments, pending
-  review requests, and gate label. If the head or checks changed, restart this
-  procedure. If a request for the key appeared, track it without posting.
+  counts as requested; never issue a duplicate. Wait for any other live Codex
+  review request on the same head to finish before considering another; an
+  unrelated human reviewer request does not block this transport.
+  For direct requests, wait for the configured review-transport checks to pass.
+  Before posting, inspect any in-flight CI-green run for this head and all
+  in-flight sweep runs repository-wide. If a gate is armed or may have been
+  claimed, let that transport settle or disarm it and verify no late trigger
+  can land. Then immediately re-read the head, check states, trigger comments,
+  pending Codex review requests, and gate label. If the head or checks changed,
+  restart this procedure. If a request for the key appeared, track it without posting.
   Post only a standalone `@codex review` comment; prose with the trigger enters
   Codex action mode. Record its comment ID and creation time as the activation
   boundary and restart the no-verdict timer.
@@ -128,17 +138,20 @@ Each scheduled run should:
   checks to pass and do not arm a duplicate gate; if it targets the old head,
   treat it as stale and use the normal new-head gate.
   A content-free retry and an adoption re-review use this direct transport
-  after green checks, even if the repository normally uses a CI gate; they do
-  not advance the round counter. In particular, do not leave a label-only gate
-  armed for a same-head retry after CI has already completed.
+  after green checks, even if the repository normally uses a CI gate. Follow
+  the repository's round policy for each exception: an empty pass counts as a
+  round where the local runbook requires it, while an adoption re-review need
+  not count unless that runbook says so. Apply the hard stop before retrying.
+  Do not leave a label-only gate armed for a same-head retry after CI has
+  already completed.
   For an ordinary new head in a repository with an `awaiting-codex-reping` CI
   gate, push the fix, re-read the head, advance `codex-round-N` exactly once
   for the handled review, and arm the gate before CI completes. The green-CI
   workflow rechecks the head and required review-transport checks after it
   claims the label. Its label claim prevents another gated trigger; the task
   must not post a direct trigger while that gate is armed or being claimed.
-  After arming, re-read the head, gate label, and workflow-produced triggers; if the head moved, disarm the stale
-  gate and restart. Some unreviewed pushes require a gate without a new round.
+  After arming, re-read the head, gate label, and workflow-produced triggers;
+  if the head moved, disarm the stale gate and restart. Some unreviewed pushes require a gate without a new round.
   In a repository without that gate, use the direct procedure after CI is
   green. Absent means round zero; remove the previous round label and apply
   `codex-round-{N+1}` only once for an addressed review. Do not request another
@@ -162,7 +175,9 @@ user's decision. Before pausing any Codex-owned PR, including one that just clos
 
 - Record the current round label and whether this gate activation advanced it,
   disarm any `awaiting-codex-reping` gate, then inspect trigger comments and
-  any CI-green or sweep run already in flight for this head. A missing label
+  any in-flight CI-green run for this head and all in-flight sweep runs across
+  the repository. Scheduled and dispatched sweeps attach to the default branch,
+  so filtering them by the PR head misses a possible claimant. A missing label
   and absent trigger do not prove that removal won: a run may already have
   claimed the label and be about to post. Wait for those runs to settle, then
   re-read and disarm any gate they restored before pausing. Recheck for another
