@@ -21,7 +21,12 @@ Immediately after opening or adopting a Codex-owned PR:
    authors can act.
 2. Create a recurring task **inside the current chat**, normally every two
    minutes, named for the repository and PR number. Do not create a standalone
-   scheduled task or a new Codex task.
+   scheduled task or a new Codex task. Scheduled runs cannot request an
+   interactive permission escalation: configure an unattended permission
+   profile or narrow command rules for authenticated GitHub network access,
+   plus the read and authorized write operations this loop needs. Verify an
+   authenticated PR read from a scheduled run and the configured write scopes
+   before relying on wake-up; if access fails, report the blocked loop.
 3. Give the scheduled task a durable prompt containing the repository, PR
    number, branch, review-transport checks, merge-only checks, and the stop
    conditions below. A deliberately deferred full-validation status belongs
@@ -37,6 +42,15 @@ Immediately after opening or adopting a Codex-owned PR:
    check's time as that head's fallback boundary. This boundary makes a later
    comment-based approval attributable to the current head and starts the
    no-verdict timer; never accept a pre-adoption approval signal against it.
+   If that leaves only a rejected pre-boundary approval and no review request
+   in flight, allow one adoption re-review on the same head after the
+   review-transport checks pass. Post one bare trigger, immediately re-read
+   the head, and classify any head race as for the content-free retry below.
+   Record the trigger ID and time as the new boundary for the commit it
+   actually requests, and restart that commit's no-verdict timer. Track this
+   separately from the ordinary per-head request and the content-free retry,
+   so the
+   once-per-head rule cannot block the adoption review or duplicate it.
 
 Each scheduled run should:
 
@@ -98,12 +112,16 @@ Each scheduled run should:
   exceptional retry on the same head even though that head was already
   requested. Track the retry separately from ordinary requested-head state and
   restart the no-verdict timer from the retry trigger's activation boundary.
-  Re-read the head, existing triggers, and in-flight review requests. If a
-  same-head retry trigger or request was created after that content-free
-  verdict, track it without posting.
-  Otherwise post one immediate standalone `@codex review` comment for this
-  exceptional same-head retry. Immediately re-read the head after posting. If
-  it moved, leave the old head's retry unused and track the trigger as an
+  First re-read the head and compare it with the content-free review's
+  reviewed commit. If they differ, treat that verdict as stale and use the
+  normal transport for the new head without spending the retry. Wait for the
+  target head's review-transport checks to pass, then immediately re-read the
+  head, checks, existing triggers, and in-flight review requests. If the head
+  or checks changed, do not post; re-evaluate them. If a same-head retry
+  trigger or request was created after that content-free verdict, track it
+  without posting. Otherwise post one standalone `@codex review` comment for
+  this exceptional same-head retry. Immediately re-read the head after
+  posting. If it moved, leave the old head's retry unused and track the trigger as an
   in-flight request until its reviewed commit is known. If it targets the new
   head, require that head's review-transport checks to pass and do not arm a
   duplicate gate; if it targets the old head, treat it as stale and use the
@@ -126,9 +144,10 @@ Each scheduled run should:
   label, create/apply `codex-round-{N+1}` exactly once for the handled review,
   and do not request another review when the counter is already 25.
   Immediately before either transport claims the request, re-read both the head
-  and the latest review-transport check states and abort if either changed. Record the
-  resulting trigger comment ID and creation time as this head's activation
-  boundary. Apart from the single content-free retry, request exactly once per
+  and the latest review-transport check states; abort if either changed.
+  Record the resulting trigger comment ID and creation time as this head's activation
+  boundary. Apart from the single content-free retry and one adoption
+  re-review after a rejected pre-boundary approval, request exactly once per
   head. If checks fail, diagnose and fix failures caused by the PR first.
 - Treat a merge conflict that prevents review-transport checks from starting,
   a cancelled or timed-out review-transport check, and a review-transport
@@ -144,7 +163,7 @@ Each scheduled run should:
 Pause the scheduled task when any authenticated, current-head approval matches
 the repository's recognized final-approval rules, the PR merges or closes,
 ownership is handed off, the user asks to stop, or a disagreement needs the
-user's decision. Before pausing a still-open Codex-owned PR:
+user's decision. Before pausing any Codex-owned PR, including one that just closed:
 
 - Record the current round label and whether this gate activation advanced it,
   disarm any `awaiting-codex-reping` gate, then inspect trigger comments and
