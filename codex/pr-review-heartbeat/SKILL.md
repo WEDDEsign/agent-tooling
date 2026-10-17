@@ -58,7 +58,9 @@ Each scheduled run should:
   gate, or request review while it is draft. If it became draft while a gate was
   armed, disarm it and settle any in-flight CI-green or sweep claim using the
   stop procedure below. On the ready transition, record that event as the
-  initial activation boundary and resume the normal loop.
+  activation boundary and use its event ID as a fresh same-head review key.
+  If automatic Codex review is already running, track it; otherwise request
+  once after transport checks pass.
 - Query the PR state, draft status, live head branch ref, labels, mergeability,
   current head SHA, review-transport and merge-only checks, all submitted
   reviews (including author, association, and `lastEditedAt`), top-level PR
@@ -121,29 +123,31 @@ Each scheduled run should:
   differs from a fresh head, treat it as stale and use the ordinary new-head
   path. Otherwise mark one exceptional retry keyed by that review ID and head.
   A second content-free response on the same head is a stop for the user.
-- Use one request procedure for an ordinary new head, an adoption re-review,
-  and a content-free retry. Keep a ledger key of (head SHA, reason, source
-  review ID or adoption boundary). A request already in flight for that key
-  counts as requested; never issue a duplicate. Wait for any other live Codex
-  review request on the same head to finish before considering another; an
-  unrelated human reviewer request does not block this transport.
+- Use one request procedure for an ordinary new head, a ready transition,
+  an adoption re-review, and a content-free retry. Keep a ledger key of
+  (head SHA, reason, and its review or event ID). A request already in flight
+  for that key counts as requested; never issue a duplicate. Wait for any
+  other live Codex review request or bot summary marked running on the same
+  head to finish before considering another; an unrelated human reviewer
+  request does not block this transport.
   For direct requests, wait for the configured review-transport checks to pass.
   Before posting, settle all configured gate claimants: in-flight CI-green
-  runs for this head, all in-flight sweeps repository-wide, and any in-flight
-  review-first controller run repository-wide or durable current-head
-  `request_intent`. A removed label
-  alone does not prove delivery is over. If a claim is uncertain, wait or pause
-  rather than post.
+  runs for this PR across current and earlier heads, all in-flight
+  sweeps repository-wide, and any in-flight review-first controller run or
+  durable current-head `request_intent`. A removed label alone does not
+  prove delivery is over.
+  If a claim is uncertain, wait or pause rather than post.
   Immediately before posting, re-read PR state and draft status, live head
-  branch ref and SHA, owner labels, transport checks, trigger comments, live
-  Codex requests, submitted reviews, top-level comments, and inline threads.
-  Classify any new feedback or approval before requesting. Require an
-  open, ready PR with the Codex owner signal, the chosen head, green transport
-  checks, no terminal verdict, and no armed gate, claimant, or equivalent
-  request. If any condition changed, classify the new events and restart or
-  stop; do not post from the old snapshot.
-  Post only a standalone `@codex review` comment; prose with the trigger enters
-  Codex action mode. Record its comment ID and creation time as the activation
+  branch ref and SHA, owner labels, mergeability, transport checks, trigger
+  comments, live Codex requests and running bot summary, submitted reviews,
+  top-level comments, inline threads, and reviewer request/removal events.
+  Apply those events chronologically before authenticating new feedback or
+  approval. Require an open, ready, mergeable PR with the Codex owner signal,
+  the chosen head, green transport checks, no terminal verdict, and no armed
+  gate, claimant, or equivalent request. If any condition changed, classify
+  the new events and restart or stop; do not post from the old snapshot.
+  In classic direct mode, post only a standalone `@codex review` comment;
+  prose with the trigger enters Codex action mode. Record its comment ID and creation time as the activation
   boundary and restart the no-verdict timer.
   Immediately re-read the head after posting and track the request until its
   reviewed commit is known. If the head moved, do not spend an old-head retry
@@ -151,16 +155,22 @@ Each scheduled run should:
   checks to pass, set its activation boundary no earlier than first observing
   that head, and do not arm a duplicate gate; if it targets the old head,
   treat it as stale and use the normal new-head gate.
-  A content-free retry and an adoption re-review use this direct transport
-  after green checks, even if the repository normally uses a CI gate. Follow
-  the repository's round policy for each exception: an empty pass counts as a
-  round where the local runbook requires it, while an adoption re-review need
+  A ready transition, content-free retry, and adoption re-review use this
+  direct transport after green checks in classic mode, even if the repository
+  normally uses a CI gate. If a review-first controller manages this PR, use
+  its durable gate and intent for every request, including adoption and
+  retries; a direct comment would not update the controller's requested-head
+  state. If controller mode cannot be verified, pause rather than post.
+  Follow the repository's round policy for each exception: an empty pass
+  counts as a round where the local runbook requires it, while an adoption re-review need
   not count unless that runbook says so. Apply the hard stop before retrying.
-  Do not leave a label-only gate armed for a same-head retry after CI has
-  already completed.
-  For an ordinary new head in a repository with an `awaiting-codex-reping` CI
-  gate, push the fix, re-read the head, advance `codex-round-N` exactly once
-  for the handled review, and arm the gate before CI completes. The green-CI
+  In classic direct mode, do not leave a label-only gate armed for a same-head
+  retry after CI has already completed.
+  For an ordinary new head in a classic-mode repository with an
+  `awaiting-codex-reping` CI gate, push the fix, re-read the head, advance
+  `codex-round-N` exactly once for the handled review, and arm the gate. Arm promptly, but if CI has already
+  completed, dispatch the configured sweep when authorized or wait for its
+  scheduled recovery; the past CI completion will not fire again. The green-CI
   workflow rechecks the head and required review-transport checks after it
   claims the label. Its label claim prevents another gated trigger; the task
   must not post a direct trigger while that gate is armed or being claimed.
@@ -189,11 +199,12 @@ ownership is handed off, the user asks to stop, or a disagreement needs the
 user's decision. Before pausing any Codex-owned PR, including one that just closed:
 
 - Record the current round label and whether this gate activation advanced it,
-  disarm any `awaiting-codex-reping` gate, then inspect trigger comments and
-  any in-flight CI-green run for this head and all in-flight sweep runs across
-  the repository. Scheduled and dispatched sweeps attach to the default branch,
-  so filtering them by the PR head misses a possible claimant. A missing label
-  and absent trigger do not prove that removal won: a run may already have
+  disarm any `awaiting-codex-reping` gate, then inspect trigger comments,
+  all in-flight CI-green runs that could target this PR (including runs for
+  earlier heads), all in-flight sweeps repository-wide, and any configured
+  review-first controller run or durable current-head `request_intent`. Older
+  CI-green runs can restore a gate after a head move; sweeps and controllers
+  may attach to the default branch. A missing label and absent trigger do not prove that removal won: a run may already have
   claimed the label and be about to post. Wait for those runs to settle, then
   re-read and disarm any gate they restored before pausing. Recheck for another
   in-flight claim. Only if no run claimed the gate, no trigger exists for that
