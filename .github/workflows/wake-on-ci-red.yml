@@ -75,12 +75,38 @@ jobs:
             exit 0
           fi
 
-          is_draft=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.draft')
+          info=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
+            --jq '[(.draft | tostring), .head.ref, ([.labels[].name] | join(","))] | @tsv')
+          is_draft=$(printf '%s' "${info}" | cut -f1)
+          head_ref=$(printf '%s' "${info}" | cut -f2)
+          labels=",$(printf '%s' "${info}" | cut -f3),"
           if [ "${is_draft}" = "true" ]; then
             echo "PR #${PR_NUMBER} is draft — leaving the review gate armed and skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
+          # Another agent owns the PR: the same owner signals wake-on-codex-review
+          # skips. Codex-owned PRs arm this gate from their own heartbeat, which
+          # handles red CI itself; an @Claude here would put a second author on
+          # the PR. Labels are read live, because workflow_run carries none.
+          # The gate stays armed for the owning author's transport.
+          case "${head_ref}" in
+            codex/*)
+              echo "PR #${PR_NUMBER} is on ${head_ref} (Codex-owned) — not waking Claude."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          for owner_label in codex-only grok-task; do
+            case "${labels}" in
+              *",${owner_label},"*)
+                echo "PR #${PR_NUMBER} carries ${owner_label} — not waking Claude."
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+            esac
+          done
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - name: Read round counter
@@ -145,11 +171,29 @@ jobs:
           HARDSTOP_ROUND: ${{ inputs.hardstop_round }}
         run: |
           set -eu
-          is_draft=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.draft')
+          info=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
+            --jq '[(.draft | tostring), .head.ref, ([.labels[].name] | join(","))] | @tsv')
+          is_draft=$(printf '%s' "${info}" | cut -f1)
+          head_ref=$(printf '%s' "${info}" | cut -f2)
+          labels=",$(printf '%s' "${info}" | cut -f3),"
           if [ "${is_draft}" = "true" ]; then
             echo "PR #${PR_NUMBER} became draft before the CI-red wake-up — standing down."
             exit 0
           fi
+          # Re-check ownership at post time: an owner label applied after the
+          # gate step must still keep Claude out (same signals as the gate).
+          case "${head_ref}" in
+            codex/*)
+              echo "PR #${PR_NUMBER} is on ${head_ref} (Codex-owned) — standing down."
+              exit 0
+              ;;
+          esac
+          case "${labels}" in
+            *",codex-only,"*|*",grok-task,"*)
+              echo "PR #${PR_NUMBER} gained an owner label before the CI-red wake-up — standing down."
+              exit 0
+              ;;
+          esac
           softwarn=""
           if [ "${MODE}" = "softwarn" ]; then
             softwarn="
