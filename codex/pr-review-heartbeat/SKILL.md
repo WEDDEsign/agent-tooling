@@ -12,15 +12,20 @@ task with its existing context; it does not create a replacement author task.
 
 Immediately after opening or adopting a Codex-owned PR:
 
-1. Ensure the repo's owner signal exists so Claude's review wake-up remains
-   suppressed. A `codex/*` branch supplies it; for every other branch, add the
-   equivalent `codex-only` label before the first review. Adoption must
-   establish a missing signal, not merely preserve one that may not exist.
+1. Establish the owner signal before a ready PR can trigger Claude. Open new
+   Codex-owned ready PRs on `codex/*`. If another branch name is required, open
+   the PR as a draft, apply `codex-only`, and only then mark it ready. Adding
+   the label after opening a ready PR can lose the initial wake-up race. When
+   adopting an existing PR, establish any missing signal and check whether a
+   Claude author task is already active; coordinate that handoff before both
+   authors can act.
 2. Create a recurring task **inside the current chat**, normally every two
    minutes, named for the repository and PR number. Do not create a standalone
    scheduled task or a new Codex task.
 3. Give the scheduled task a durable prompt containing the repository, PR
-   number, branch, required checks, and the stop conditions below.
+   number, branch, review-transport checks, merge-only checks, and the stop
+   conditions below. A deliberately deferred full-validation status belongs
+   only to the merge gate.
 4. Record a head-activation boundary in this task. For an initially ready PR,
    use the PR creation event. A draft has no active review boundary: when it
    becomes ready, use its `ready_for_review` event. For every later head, use
@@ -39,7 +44,8 @@ Each scheduled run should:
   that it became ready; do not run the no-verdict timer, advance a round, arm a
   gate, or request review while it is draft. On the ready transition, record
   that event as the initial activation boundary and resume the normal loop.
-- Query the PR state, mergeability, current head SHA, required checks, all
+- Query the PR state, mergeability, current head SHA, review-transport and
+  merge-only checks, all
   submitted reviews (including `lastEditedAt`), top-level PR conversation
   comments (including author, association, and `updatedAt`), and all inline
   review threads and comments (including each comment's `updatedAt`). Also
@@ -92,8 +98,11 @@ Each scheduled run should:
   exceptional retry on the same head even though that head was already
   requested. Track the retry separately from ordinary requested-head state and
   restart the no-verdict timer from the retry trigger's activation boundary.
-  If the retry is also content-free, pause and ask the user instead of polling
-  forever.
+  After re-reading the head, existing triggers, and in-flight review requests,
+  post one immediate standalone `@codex review` comment for this exceptional
+  same-head retry. Do not route it through a label-only CI gate that may wait
+  for the next push or sweep, and do not advance the review round. If the retry
+  is also content-free, pause and ask the user instead of polling forever.
 - Use exactly one repository-configured transport for the next Codex review.
   In a repository with an `awaiting-codex-reping` CI gate, push the fix first,
   re-read the new head, then advance the durable `codex-round-N` label and arm
@@ -109,13 +118,15 @@ Each scheduled run should:
   label, create/apply `codex-round-{N+1}` exactly once for the handled review,
   and do not request another review when the counter is already 25.
   Immediately before either transport claims the request, re-read both the head
-  and the latest required-check states and abort if either changed. Record the
+  and the latest review-transport check states and abort if either changed. Record the
   resulting trigger comment ID and creation time as this head's activation
   boundary. Apart from the single content-free retry, request exactly once per
   head. If checks fail, diagnose and fix failures caused by the PR first.
-- Treat a merge conflict that prevents checks from starting, a cancelled or
-  timed-out required check, and a required status that remains missing as
-  recovery states rather than ordinary waiting. Follow the repository's
+- Treat a merge conflict that prevents review-transport checks from starting,
+  a cancelled or timed-out review-transport check, and a review-transport
+  status that remains missing as recovery states rather than ordinary waiting.
+  A deliberately deferred full-validation status is expected until the
+  repository's merge-readiness gate runs; do not recover it during iteration. Follow the repository's
   mechanical recovery procedure when authorized; otherwise pause and ask the
   user. Do not poll a terminal or permanently blocked CI state forever.
 - Stop and ask the user instead of changing code when the author disagrees
@@ -128,13 +139,15 @@ ownership is handed off, the user asks to stop, or a disagreement needs the
 user's decision. Before pausing a still-open Codex-owned PR:
 
 - Record the current round label and whether this gate activation advanced it,
-  disarm any `awaiting-codex-reping` gate, and re-read trigger comments around
-  that removal. If removal conclusively won the claim race, no trigger exists
-  for that cycle, and this activation advanced the counter, remove the unused
-  current round label, then reapply the previous label only when its number is
-  greater than zero. If this activation did not advance the counter, leave its
-  existing round label unchanged. If the outcome is uncertain or a trigger
-  landed, also leave the counter unchanged and report that state.
+  disarm any `awaiting-codex-reping` gate, then inspect trigger comments and
+  any CI-green or sweep run already in flight for this head. A missing label
+  and absent trigger do not prove that removal won: a run may already have
+  claimed the label and be about to post. Wait for those runs to settle before
+  deciding. Only if no run claimed the gate, no trigger exists for that cycle,
+  and this activation advanced the counter, remove the unused current round
+  label and reapply the previous label when its number is greater than zero.
+  Otherwise leave the counter unchanged. If a claim cannot be ruled out, keep
+  the task active for final delivery and report the uncertain outcome.
 - If a trigger is already inbound, keep the scheduled task active for that one
   final delivery only to record, classify, and report its events. A stop or
   handoff grants no authority to implement its findings, push, reply, advance
