@@ -35,7 +35,10 @@ Immediately after opening or adopting a Codex-owned PR:
    use the PR creation event. A draft has no active review boundary: when it
    becomes ready, use its `ready_for_review` event. For every later head, use
    the database ID and creation time of the bare review-trigger comment posted
-   for that exact head.
+   for that exact head. If a direct trigger races a push but the resulting
+   review targets the new head, use no earlier than the time that new head was
+   first observed as its boundary; the pre-push trigger cannot authenticate
+   an approval for the new commit.
    When adopting an existing head that has neither boundary, first read and
    classify its existing reviews, comments, and unresolved threads, process any
    actionable feedback, and only then ledger those events. Record the adoption
@@ -56,10 +59,12 @@ Each scheduled run should:
   armed, disarm it and settle any in-flight CI-green or sweep claim using the
   stop procedure below. On the ready transition, record that event as the
   initial activation boundary and resume the normal loop.
-- Query the PR state, labels, mergeability, current head SHA, review-transport
-  and merge-only checks, all submitted reviews (including `lastEditedAt`),
-  top-level PR conversation comments (including author, association, and `updatedAt`), and all inline
-  review threads and comments (including each comment's `updatedAt`). Also
+- Query the PR state, draft status, live head branch ref, labels, mergeability,
+  current head SHA, review-transport and merge-only checks, all submitted
+  reviews (including author, association, and `lastEditedAt`), top-level PR
+  conversation comments (including author, association, and `updatedAt`), and
+  all inline review threads and comments (including each comment's author,
+  association, and `updatedAt`). Also
   query the PR timeline's `ReviewRequestedEvent` and
   `ReviewRequestRemovedEvent` history. Apply those events chronologically to
   preserve requests that disappeared because the reviewer submitted while
@@ -123,19 +128,28 @@ Each scheduled run should:
   review request on the same head to finish before considering another; an
   unrelated human reviewer request does not block this transport.
   For direct requests, wait for the configured review-transport checks to pass.
-  Before posting, inspect any in-flight CI-green run for this head and all
-  in-flight sweep runs repository-wide. If a gate is armed or may have been
-  claimed, let that transport settle or disarm it and verify no late trigger
-  can land. Then immediately re-read the head, check states, trigger comments,
-  pending Codex review requests, and gate label. If the head or checks changed,
-  restart this procedure. If a request for the key appeared, track it without posting.
+  Before posting, settle all configured gate claimants: in-flight CI-green
+  runs for this head, all in-flight sweeps repository-wide, and any in-flight
+  review-first controller run repository-wide or durable current-head
+  `request_intent`. A removed label
+  alone does not prove delivery is over. If a claim is uncertain, wait or pause
+  rather than post.
+  Immediately before posting, re-read PR state and draft status, live head
+  branch ref and SHA, owner labels, transport checks, trigger comments, live
+  Codex requests, submitted reviews, top-level comments, and inline threads.
+  Classify any new feedback or approval before requesting. Require an
+  open, ready PR with the Codex owner signal, the chosen head, green transport
+  checks, no terminal verdict, and no armed gate, claimant, or equivalent
+  request. If any condition changed, classify the new events and restart or
+  stop; do not post from the old snapshot.
   Post only a standalone `@codex review` comment; prose with the trigger enters
   Codex action mode. Record its comment ID and creation time as the activation
   boundary and restart the no-verdict timer.
   Immediately re-read the head after posting and track the request until its
   reviewed commit is known. If the head moved, do not spend an old-head retry
   on the new head. If the review targets the new head, require its transport
-  checks to pass and do not arm a duplicate gate; if it targets the old head,
+  checks to pass, set its activation boundary no earlier than first observing
+  that head, and do not arm a duplicate gate; if it targets the old head,
   treat it as stale and use the normal new-head gate.
   A content-free retry and an adoption re-review use this direct transport
   after green checks, even if the repository normally uses a CI gate. Follow
@@ -151,7 +165,8 @@ Each scheduled run should:
   claims the label. Its label claim prevents another gated trigger; the task
   must not post a direct trigger while that gate is armed or being claimed.
   After arming, re-read the head, gate label, and workflow-produced triggers;
-  if the head moved, disarm the stale gate and restart. Some unreviewed pushes require a gate without a new round.
+  if the head moved, disarm the stale gate and restart. Some unreviewed pushes
+  require a gate without a new round.
   In a repository without that gate, use the direct procedure after CI is
   green. Absent means round zero; remove the previous round label and apply
   `codex-round-{N+1}` only once for an addressed review. Do not request another
