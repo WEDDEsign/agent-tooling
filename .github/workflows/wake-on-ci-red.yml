@@ -144,11 +144,30 @@ jobs:
           HARDSTOP_ROUND: ${{ inputs.hardstop_round }}
         run: |
           set -eu
-          is_draft=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.draft')
+          info=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
+            --jq '[(.draft | tostring), .head.ref, ([.labels[].name] | join(","))] | @tsv')
+          is_draft=$(printf '%s' "${info}" | cut -f1)
+          head_ref=$(printf '%s' "${info}" | cut -f2)
+          labels=",$(printf '%s' "${info}" | cut -f3),"
           if [ "${is_draft}" = "true" ]; then
             echo "PR #${PR_NUMBER} became draft before hard-stop escalation — standing down."
             exit 0
           fi
+          # Same owner re-check as the wake-up: another author's loop owns its
+          # own stop, so an owner label applied after the gate step must also
+          # keep this path from mutating the PR.
+          case "${head_ref}" in
+            codex/*)
+              echo "PR #${PR_NUMBER} is on ${head_ref} (Codex-owned) — no hard-stop mutation."
+              exit 0
+              ;;
+          esac
+          case "${labels}" in
+            *",codex-only,"*|*",grok-task,"*)
+              echo "PR #${PR_NUMBER} gained an owner label before hard-stop escalation — no mutation."
+              exit 0
+              ;;
+          esac
           gh label create loop-stuck --repo "${REPO}" \
             --color B60205 \
             --description "Codex review autopilot exceeded round ${HARDSTOP_ROUND} — human intervention required" \

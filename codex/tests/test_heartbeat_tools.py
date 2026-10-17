@@ -146,10 +146,12 @@ class CiGreenClaimTests(unittest.TestCase):
     def test_ci_red_skips_claude_on_other_owners_before_and_at_wake_up(self):
         workflow = CI_RED_PATH.read_text(encoding="utf-8")
         gate = workflow.index("Check awaiting-codex-reping label")
+        hardstop = workflow.index("gh label create loop-stuck")
         wake = workflow.index("Post @Claude wake-up comment")
         post = workflow.index('gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "@Claude', wake)
+        hardstop_read = workflow.rindex("info=$(gh api", gate, hardstop)
 
-        for start, end in ((gate, wake), (wake, post)):
+        for start, end in ((gate, hardstop_read), (hardstop_read, hardstop), (wake, post)):
             section = workflow[start:end]
             self.assertIn('case "${head_ref}" in', section)
             self.assertIn("codex/*)", section)
