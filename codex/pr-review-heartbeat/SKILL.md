@@ -66,8 +66,12 @@ Each scheduled run should:
   reviews (including author, association, and `lastEditedAt`), top-level PR
   conversation comments (including author, association, and `updatedAt`), and
   all inline review threads and comments (including each comment's author,
-  association, and `updatedAt`). Also
-  query the PR timeline's `ReviewRequestedEvent` and
+  association, and `updatedAt`). For review-first PRs, also query reactions
+  on the Codex bot's review summary and the dedicated App's authenticated
+  controller checkpoint for this PR and head. A checkpoint-pointer comment is
+  only a locator, never evidence. Refresh summary reactions on every poll:
+  a new reaction need not change the comment's `updatedAt`. Also query the
+  PR timeline's `ReviewRequestedEvent` and
   `ReviewRequestRemovedEvent` history. Apply those events chronologically to
   preserve requests that disappeared because the reviewer submitted while
   expiring identities that were explicitly unrequested. Use each review's
@@ -79,8 +83,12 @@ Each scheduled run should:
   resolved-to-unresolved transition is new activity even when the thread
   contains no new comment ID.
 - On every run, require the Codex owner signal (`codex/*` or `codex-only`)
-  before unattended author actions. If it disappeared, disarm any pending gate,
-  pause author work, and coordinate ownership; another author may be active.
+  before unattended author actions. If it disappeared, enter the full stop
+  procedure below: disarm the gate, settle in-flight CI-green, sweep, and
+  review-first claims, and account for any trigger already inbound before
+  pausing or coordinating ownership. A claimant may have removed the label
+  already, so label absence alone cannot prove delivery stopped. Do not make
+  further author changes during the handoff; another author may be active.
 - Apply the repository's approval rules only after authenticating the signal.
   A submitted review supplies its reviewer identity, but a token-bearing
   submitted review still requires authorization: reject the PR author and
@@ -90,10 +98,17 @@ Each scheduled run should:
   token. For every repository-recognized Codex approval form, accept the
   configured Codex review bot identity without requiring a review request or
   repository role, and reject that Codex-specific form from any other author.
+  For an edited review-first summary, use the controller's clean-verdict rule:
+  require a fresh Codex-bot +1 reaction after the summary update or its
+  authenticated `approved_summary` receipt, with no later findings or
+  invalidating edit. A completed summary alone is not approval.
 - Compare the reviewed commit with the current PR head. If they differ, report
   the review as stale and confirm that each finding still applies before
-  changing code. Never treat an approval on an older commit as terminal. A
-  submitted approval is current only when its reviewed commit matches a
+  changing code. In classic mode, never treat an approval on an older commit
+  as terminal. In review-first mode, accept an older clean review for a moved
+  head only when the authenticated controller has accepted its unchanged-diff
+  carry-over for that current head; do not infer carry-over from the diff
+  yourself. A submitted approval is current only when its reviewed commit matches a
   freshly read head. For a top-level approval comment with no reviewed commit,
   compare its immutable creation time with the recorded activation boundary
   for this exact head. An edit cannot renew approval for a later head; if the
@@ -157,10 +172,14 @@ Each scheduled run should:
   treat it as stale and use the normal new-head gate.
   A ready transition, content-free retry, and adoption re-review use this
   direct transport after green checks in classic mode, even if the repository
-  normally uses a CI gate. If a review-first controller manages this PR, use
-  its durable gate and intent for every request, including adoption and
-  retries; a direct comment would not update the controller's requested-head
-  state. If controller mode cannot be verified, pause rather than post.
+  normally uses a CI gate. If a review-first controller manages this PR, check
+  its authenticated current-head decision before arming a request: if it
+  carried a prior clean review across an unchanged diff, let final validation
+  proceed without a new review or round. Arming a gate would invalidate that
+  evidence. Otherwise use its durable gate and intent for every request,
+  including adoption and retries; a direct comment would not update the
+  controller's requested-head state. If controller mode or carry-over cannot
+  be verified, pause rather than post.
   Follow the repository's round policy for each exception: an empty pass
   counts as a round where the local runbook requires it, while an adoption re-review need
   not count unless that runbook says so. Apply the hard stop before retrying.
@@ -202,8 +221,12 @@ user's decision. Before pausing any Codex-owned PR, including one that just clos
   disarm any `awaiting-codex-reping` gate, then inspect trigger comments,
   all in-flight CI-green runs that could target this PR (including runs for
   earlier heads), all in-flight sweeps repository-wide, and any configured
-  review-first controller run or durable current-head `request_intent`. Older
-  CI-green runs can restore a gate after a head move; sweeps and controllers
+  review-first controller run or durable current-head `request_intent` on an
+  open PR. On a closed or merged PR, settle live runs and any inbound trigger,
+  then disregard a stored `request_intent`; the controller may leave it behind
+  because terminal reconciliation does not clear state. Do not wait for that
+  intent to disappear or restore its gate. Older CI-green runs can restore a
+  gate after a head move; sweeps and controllers
   may attach to the default branch. A missing label and absent trigger do not prove that removal won: a run may already have
   claimed the label and be about to post. Wait for those runs to settle, then
   re-read and disarm any gate they restored before pausing. Recheck for another
