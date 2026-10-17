@@ -98,11 +98,19 @@ Each scheduled run should:
   exceptional retry on the same head even though that head was already
   requested. Track the retry separately from ordinary requested-head state and
   restart the no-verdict timer from the retry trigger's activation boundary.
-  After re-reading the head, existing triggers, and in-flight review requests,
-  post one immediate standalone `@codex review` comment for this exceptional
-  same-head retry. Do not route it through a label-only CI gate that may wait
-  for the next push or sweep, and do not advance the review round. If the retry
-  is also content-free, pause and ask the user instead of polling forever.
+  Re-read the head, existing triggers, and in-flight review requests. If a
+  same-head retry trigger or request was created after that content-free
+  verdict, track it without posting.
+  Otherwise post one immediate standalone `@codex review` comment for this
+  exceptional same-head retry. Immediately re-read the head after posting. If
+  it moved, leave the old head's retry unused and track the trigger as an
+  in-flight request until its reviewed commit is known. If it targets the new
+  head, require that head's review-transport checks to pass and do not arm a
+  duplicate gate; if it targets the old head, treat it as stale and use the
+  normal gate for the new head. Do not route the retry through a label-only
+  CI gate that may wait for the next push or sweep, and do not advance the
+  review round. If the retry is also content-free, pause and ask the user
+  instead of polling forever.
 - Use exactly one repository-configured transport for the next Codex review.
   In a repository with an `awaiting-codex-reping` CI gate, push the fix first,
   re-read the new head, then advance the durable `codex-round-N` label and arm
@@ -142,12 +150,14 @@ user's decision. Before pausing a still-open Codex-owned PR:
   disarm any `awaiting-codex-reping` gate, then inspect trigger comments and
   any CI-green or sweep run already in flight for this head. A missing label
   and absent trigger do not prove that removal won: a run may already have
-  claimed the label and be about to post. Wait for those runs to settle before
-  deciding. Only if no run claimed the gate, no trigger exists for that cycle,
-  and this activation advanced the counter, remove the unused current round
-  label and reapply the previous label when its number is greater than zero.
-  Otherwise leave the counter unchanged. If a claim cannot be ruled out, keep
-  the task active for final delivery and report the uncertain outcome.
+  claimed the label and be about to post. Wait for those runs to settle, then
+  re-read and disarm any gate they restored before pausing. Recheck for another
+  in-flight claim. Only if no run claimed the gate, no trigger exists for that
+  cycle, and this activation advanced the counter, remove the unused current
+  round label and reapply the previous label when its number is greater than
+  zero. Otherwise leave the counter unchanged. If a claim or restoration
+  cannot be ruled out, keep the task active for final delivery and report the
+  uncertain outcome.
 - If a trigger is already inbound, keep the scheduled task active for that one
   final delivery only to record, classify, and report its events. A stop or
   handoff grants no authority to implement its findings, push, reply, advance
