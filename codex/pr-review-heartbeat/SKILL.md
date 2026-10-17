@@ -178,8 +178,8 @@ Each scheduled run should:
   proceed without a new review or round. Arming a gate would invalidate that
   evidence. Otherwise use its durable gate and intent for every request,
   including adoption and retries; a direct comment would not update the
-  controller's requested-head state. If controller mode or carry-over cannot
-  be verified, pause rather than post.
+  controller's requested-head state. If controller mode is uncertain, or a claimed carry-over cannot be
+  verified, pause rather than post.
   Follow the repository's round policy for each exception: an empty pass
   counts as a round where the local runbook requires it, while an adoption re-review need
   not count unless that runbook says so. Apply the hard stop before retrying.
