@@ -137,11 +137,26 @@ class CiGreenClaimTests(unittest.TestCase):
         workflow = CI_RED_PATH.read_text(encoding="utf-8")
         gate = workflow.index("Check awaiting-codex-reping label")
         wake = workflow.index("Post @Claude wake-up comment")
-        initial_read = workflow.index('is_draft=$(gh api', gate)
-        final_read = workflow.index('is_draft=$(gh api', wake)
+        initial_read = workflow.index('is_draft=$(printf', gate)
+        final_read = workflow.index('is_draft=$(printf', wake)
 
         self.assertLess(initial_read, wake)
         self.assertGreater(final_read, wake)
+
+    def test_ci_red_skips_claude_on_other_owners_before_and_at_wake_up(self):
+        workflow = CI_RED_PATH.read_text(encoding="utf-8")
+        gate = workflow.index("Check awaiting-codex-reping label")
+        hardstop = workflow.index("gh label create loop-stuck")
+        wake = workflow.index("Post @Claude wake-up comment")
+        post = workflow.index('gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "@Claude', wake)
+        hardstop_read = workflow.rindex("info=$(gh api", gate, hardstop)
+
+        for start, end in ((gate, hardstop_read), (hardstop_read, hardstop), (wake, post)):
+            section = workflow[start:end]
+            self.assertIn('case "${head_ref}" in', section)
+            self.assertIn("codex/*)", section)
+            self.assertIn("codex-only", section)
+            self.assertIn("grok-task", section)
 
     def test_sweep_claim_rechecks_terminal_state_and_latest_checks(self):
         workflow = SWEEP_PATH.read_text(encoding="utf-8")
