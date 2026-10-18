@@ -189,6 +189,13 @@ Each scheduled run should:
   not count unless that runbook says so. Apply the hard stop before retrying.
   In classic direct mode, do not leave a label-only gate armed for a same-head
   retry after CI has already completed.
+  Round cap, on every path: before advancing a counter, arming a gate, or
+  requesting review, compare the round this review would start with the
+  repository's author-side cap (its own hard stop, never above 25). The
+  workflow backstop can be higher than that cap and is not the limit to use.
+  At the cap, do not arm or request: run the stop procedure below, apply the
+  repository's owner-facing stop label (for example `needs-owner`) with any
+  CI gate removed first, post its required stop note, and pause.
   For an ordinary new head in a classic-mode repository with an
   `awaiting-codex-reping` CI gate, push the fix, re-read the head, advance
   `codex-round-N` exactly once for the handled review. Immediately before
@@ -208,9 +215,8 @@ Each scheduled run should:
   require a gate without a new round.
   In a repository without that gate, use the direct procedure after CI is
   green. Absent means round zero; remove the previous round label and apply
-  `codex-round-{N+1}` only once for an addressed review. Do not request another
-  review when the counter is already 25 or the repository's lower hard stop
-  applies. Diagnose PR-caused check failures before requesting review.
+  `codex-round-{N+1}` only once for an addressed review, subject to the round
+  cap above. Diagnose PR-caused check failures before requesting review.
 - Treat a merge conflict that prevents review-transport checks from starting,
   a cancelled or timed-out review-transport check, and a review-transport
   status that remains missing as recovery states rather than ordinary waiting.
