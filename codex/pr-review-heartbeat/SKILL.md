@@ -118,9 +118,12 @@ Each scheduled run should:
   is not an activation boundary because a locally old commit can be pushed after the comment.
 - If there is no new activity, make no repository or GitHub changes and keep
   the update terse. If the latest review request still has no subsequent Codex
-  verdict about 30 minutes after that request's activation boundary, pause and
-  ask the user to invoke the repository's recovery trigger instead of polling
-  indefinitely.
+  verdict about 30 minutes after that request's activation boundary, ask the
+  user to invoke the repository's recovery trigger instead of re-requesting
+  yourself. Do not pause for this: keep the scheduled task running so it
+  consumes the recovered review, since a review event cannot wake a paused
+  task. If no verdict arrives about 30 minutes after the recovery either,
+  pause and report the stalled loop.
 - Classify every new or edited submitted review, every new or edited top-level
   conversation comment, every new or edited inline thread comment, and every
   reopened inline thread before recording it as handled. For a reopened thread,
@@ -201,9 +204,12 @@ Each scheduled run should:
   `codex-round-N` exactly once for the handled review. Immediately before
   arming the gate, re-read PR state, draft status, live branch ref and SHA,
   owner labels, mergeability, and transport checks. Require the same open,
-  ready, mergeable, Codex-owned head with green transport checks. If ownership
-  disappeared, enter the full stop procedure; if the head changed, restart.
-  Only then arm the gate. Arm promptly, but if CI has already completed,
+  ready, mergeable, Codex-owned head whose transport checks are pending or
+  green, not failed. Do not wait for green: the CI-green workflow fires only
+  when CI completes, so a gate armed after that misses its event, and the
+  workflow itself rechecks the head and checks after it claims the gate. If
+  ownership disappeared, enter the full stop procedure; if the head changed,
+  restart. Only then arm the gate. Arm promptly, but if CI has already completed,
   dispatch the configured sweep when authorized or wait for its scheduled
   recovery; the past CI completion will not fire again. The green-CI
   workflow rechecks the head and required review-transport checks after it
