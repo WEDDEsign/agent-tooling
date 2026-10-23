@@ -30,6 +30,10 @@ name: Wake Claude on CI green (reusable)
 on:
   workflow_call:
     inputs:
+      runner:
+        description: 'Runner label for this job. Defaults to Ubicloud; pass ubuntu-latest from a repo without Ubicloud.'
+        type: string
+        default: 'ubicloud-standard-2'
       excluded_label:
         description: PR label owned by a separate review transport; empty preserves existing behavior
         type: string
@@ -64,7 +68,7 @@ jobs:
     if: >-
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.conclusion == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     steps:
       - name: Find PR for head SHA
         id: pr

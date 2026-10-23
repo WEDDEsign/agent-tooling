@@ -15,6 +15,10 @@ name: Auto-resolve review threads (reusable)
 on:
   workflow_call:
     inputs:
+      runner:
+        description: 'Runner label for this job. Defaults to Ubicloud; pass ubuntu-latest from a repo without Ubicloud.'
+        type: string
+        default: 'ubicloud-standard-2'
       extra_identities:
         description: 'Comma-separated extra logins allowed to auto-resolve (beyond PR author + claude[bot]). e.g. "WEDDEsign".'
         type: string
@@ -57,7 +61,7 @@ jobs:
       github.event.comment.user.login == github.event.pull_request.user.login ||
       github.event.comment.user.login == 'claude[bot]' ||
       contains(inputs.extra_identities, github.event.comment.user.login) )
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     steps:
       - name: Check replier is allowed
         id: gate

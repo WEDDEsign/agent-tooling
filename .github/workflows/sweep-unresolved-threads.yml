@@ -70,6 +70,10 @@ name: Sweep green PRs with unresolved review threads (reusable)
 on:
   workflow_call:
     inputs:
+      runner:
+        description: 'Runner label for this job. Defaults to Ubicloud; pass ubuntu-latest from a repo without Ubicloud.'
+        type: string
+        default: 'ubicloud-standard-2'
       required_checks:
         description: 'JSON array of required check-run names that must all be success before a PR counts as green. Use the SAME value as the wake-on-ci-green caller.'
         type: string
@@ -98,7 +102,7 @@ permissions:
 
 jobs:
   sweep:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
 
     # Serializes sweeps against each other. Two overlapping runs would both
     # read the same un-marked PR and both post, because the marker is only
