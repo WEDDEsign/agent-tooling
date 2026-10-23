@@ -25,6 +25,10 @@ name: Wake Claude on Codex review (reusable)
 on:
   workflow_call:
     inputs:
+      runner:
+        description: 'Runner label for this job. Defaults to Ubicloud; pass ubuntu-latest from a repo without Ubicloud.'
+        type: string
+        default: 'ubicloud-standard-2'
       escalation_handle:
         description: 'Who the hard-stop pings (e.g. @WEDDEsign).'
         type: string
@@ -61,7 +65,7 @@ jobs:
       github.event.review.state != 'approved' &&
       !contains(github.event.review.body, 'APPROVED') &&
       !contains(github.event.review.body, 'Codex Review: Didn''t find any major issues')
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     steps:
       - name: Detect content-free Codex review
         id: findings

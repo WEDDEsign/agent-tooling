@@ -105,6 +105,10 @@ name: Sweep stalled Codex re-pings (reusable)
 on:
   workflow_call:
     inputs:
+      runner:
+        description: 'Runner label for this job. Defaults to Ubicloud; pass ubuntu-latest from a repo without Ubicloud.'
+        type: string
+        default: 'ubicloud-standard-2'
       excluded_label:
         description: PR label owned by a separate review transport; empty preserves existing behavior
         type: string
@@ -141,7 +145,7 @@ permissions:
 
 jobs:
   sweep:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
 
     # Serializes sweeps against each other only — exclusion against the event
     # path is the label claim described in the header, not this group. Two
