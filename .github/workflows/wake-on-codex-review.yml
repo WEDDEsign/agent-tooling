@@ -45,6 +45,10 @@ on:
         description: 'Round at which the workflow stops auto-waking Claude and escalates instead. Defaults to codex-review-triage §3''s highest surface tier.'
         type: number
         default: 15
+      merge_gate_label:
+        description: 'Label that starts the final full-suite run (Mentra/NordScope: ready-to-merge). Removed when Codex raises findings, so fix pushes do not re-run the full suites and the PR stops reading as mergeable. Empty disables.'
+        type: string
+        default: 'ready-to-merge'
     secrets:
       CEREMONY_PAT:
         description: 'Fine-grained PAT used to author wake-up / escalation comments as a human identity.'
@@ -87,6 +91,34 @@ jobs:
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # A Codex review with findings means the head is no longer merge-ready,
+      # whatever the label says. Left on, the merge-gate label re-runs the full
+      # suites on every fix push, which is the most expensive CI there is. It
+      # also lets a PR read "Ready to merge" once the suites pass on a head
+      # Codex has not cleared (WEDDEsign/Mentra#5298, three rounds after the
+      # label went on at round 0). Remove it; the author re-adds it after a
+      # clean review of the current head. GITHUB_TOKEN's label events trigger
+      # no workflows, so this starts nothing. Runs before the round and
+      # hard-stop steps so it applies on every findings review.
+      - name: Withdraw the merge gate
+        if: steps.findings.outputs.skip != 'true' && inputs.merge_gate_label != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          LABEL: ${{ inputs.merge_gate_label }}
+        run: |
+          set -eu
+          has=$(gh api --paginate --slurp "repos/${REPO}/issues/${PR_NUMBER}/labels?per_page=100" \
+            | jq -r --arg l "${LABEL}" '[.[][] | select(.name == $l)] | length')
+          if [ "${has}" = "0" ]; then
+            echo "#${PR_NUMBER} does not carry ${LABEL}; nothing to withdraw."
+            exit 0
+          fi
+          enc=$(jq -rn --arg l "${LABEL}" '$l|@uri')
+          gh api -X DELETE "repos/${REPO}/issues/${PR_NUMBER}/labels/${enc}" >/dev/null
+          echo "Removed ${LABEL} from #${PR_NUMBER}: Codex raised findings on the current head."
 
       - name: Read round counter
         id: round
@@ -149,8 +181,14 @@ jobs:
           REQUIRED_CHECKS_TEXT: ${{ inputs.required_checks_text }}
           SOFTWARN_ROUND: ${{ inputs.softwarn_round }}
           HARDSTOP_ROUND: ${{ inputs.hardstop_round }}
+          MERGE_GATE_LABEL: ${{ inputs.merge_gate_label }}
         run: |
           set -eu
+          gate_note=""
+          if [ -n "${MERGE_GATE_LABEL}" ]; then
+            gate_note="
+          8. \`${MERGE_GATE_LABEL}\` has been removed because this review has findings. Re-add it only after a clean Codex review of the current head, so the full suites run once, on the head that will merge."
+          fi
           softwarn=""
           if [ "${MODE}" = "softwarn" ]; then
             softwarn="
@@ -167,4 +205,4 @@ jobs:
           4. Bump the round counter: read the existing \`codex-round-N\` label (absent means N=0), remove it, add \`codex-round-{N+1}\` (create the label on the fly if missing). This counter drives the soft-warn and hard-stop thresholds below.
           5. **Add the \`awaiting-codex-reping\` label.** This is the gate the CI-green and CI-red wake-ups read: without it, CI going green does nothing at all and the loop parks silently with no re-ping. Do both label operations, in that order, before your session ends.
           6. Once fix commits land **and** ${REQUIRED_CHECKS_TEXT} are green, the CI-green wake-up posts the bare Codex review trigger for you (directly). Never write that trigger phrase into a comment yourself — a Codex mention anywhere in a comment body, even quoted inside prose, flips Codex into action mode and it writes code instead of reviewing. If CI fails, the CI-red wake-up will spawn a session to push another fix.
-          7. Terminate when Codex submits a review with state \`APPROVED\`, posts \`APPROVED\` on its own line, or uses its fixed \"Codex Review: Didn't find any major issues\" approval template. Soft-warn at round ${SOFTWARN_ROUND}, hard-stop at round ${HARDSTOP_ROUND} (workflow-enforced).${softwarn}"
+          7. Terminate when Codex submits a review with state \`APPROVED\`, posts \`APPROVED\` on its own line, or uses its fixed \"Codex Review: Didn't find any major issues\" approval template. Soft-warn at round ${SOFTWARN_ROUND}, hard-stop at round ${HARDSTOP_ROUND} (workflow-enforced).${gate_note}${softwarn}"
