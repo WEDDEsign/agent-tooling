@@ -192,6 +192,22 @@ jobs:
 
           note() { printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"; }
 
+          # Probe CEREMONY_PAT before reading any PR. This sweep is the only
+          # scheduled job on the token, so it is the one place an expired or
+          # revoked value can surface on a day nothing needs re-pinging. Without
+          # the probe, a rejected token only showed up as a failed post. That
+          # post was then restored and reported as "will retry next sweep", and
+          # the run exited green. In Nov 2026 that hid an expired token for
+          # days across every consumer, while re-pings silently never landed.
+          # A transient API error here fails one run red; the next sweep retries.
+          if ! probe_err=$(GH_TOKEN="${CEREMONY_PAT}" gh api user --jq '.login' 2>&1 >/dev/null); then
+            note "## Codex re-ping sweep"
+            note ""
+            note "🚨 **CEREMONY_PAT was rejected.** No re-ping or wake call can post until it is rotated in this repo's Actions secrets."
+            echo "::error::CEREMONY_PAT was rejected by GitHub (${probe_err}). Rotate it in this repo's Actions secrets; until then every re-ping and wake call fails."
+            exit 1
+          fi
+
           # `--paginate --slurp`, and the doubled `.[][]`, are both load-bearing.
           # gh documents that with --paginate alone "Each page is a separate JSON
           # array or object", so --jq runs on every page independently and `max`
@@ -245,6 +261,7 @@ jobs:
           # Set when a PR is left with neither trigger nor gate. Sweeping continues so
           # one broken PR cannot hide the rest, but the run must end red.
           had_fatal=0
+          had_post_failure=0
 
           note "| PR | Outcome |"
           note "| --- | --- |"
@@ -564,6 +581,10 @@ jobs:
               # path and to every future sweep, which selects on that label. Fail
               # loudly, and keep sweeping the rest: one broken PR must not hide the
               # others. The run exits non-zero at the end.
+              # Restored is recoverable for the PR, not a successful run. Every
+              # post failing (an expired token) must turn the run red, or the
+              # outage reads as routine retries until someone opens the logs.
+              had_post_failure=1
               if gh api -X POST "repos/${REPO}/issues/${pr}/labels" -f "labels[]=${LABEL}" >/dev/null 2>&1; then
                 note "| #${pr} | ❌ post failed — gate restored, will retry next sweep |"
                 echo "::error::Failed to post the re-ping on #${pr}; gate restored."
@@ -582,5 +603,11 @@ jobs:
           if [ "${had_fatal}" -ne 0 ]; then
             note ""
             note "> 🚨 At least one PR lost its gate entirely. See the errors above — each needs its label re-applied by hand."
+            exit 1
+          fi
+
+          if [ "${had_post_failure}" -ne 0 ]; then
+            note ""
+            note "> ❌ At least one re-ping failed to post. Gates were restored and the next sweep retries, but the run fails so the cause is seen."
             exit 1
           fi
